@@ -1,0 +1,383 @@
+library(tidyverse)
+library(readxl)
+
+
+# 1. Prepare the data
+# add directory
+data_immune_cancer_distance <- read_excel([...]
+                                          sheet = "Data")
+View(data_immune_cancer_distance)
+
+
+
+# Make distance categorical so it appears in the desired order
+data_immune_cancer_distance$Distance <- factor(
+  data_immune_cancer_distance$Distance,
+  levels = c(5, 10, 20)
+)
+
+nucleus_data <- data_immune_cancer_distance %>%
+  filter(`Expanded from (nucleus/cytoplasm)` == "nucleus")
+
+
+# 2. Prepare variables
+
+nucleus_data <- nucleus_data %>%
+  mutate(
+    Distance = factor(
+      Distance,
+      levels = c(5, 10, 20)
+    ),
+    
+    Treatment = factor(
+      Treatment,
+      levels = c("control", "artesunate")
+    ),
+    
+    Dead = factor(
+      case_when(
+        Dead == 0 ~ "Intact cytoplasm",
+        Dead == 1 ~ "Loss of cytoplasm",
+        TRUE ~ NA_character_
+      ),
+      levels = c("Intact cytoplasm", "Loss of cytoplasm")
+    ),
+    
+    Tumour_ID = interaction(
+      Mouse_id,
+      img,
+      Tumour_ROI
+    ),
+    
+    Condition = case_when(
+      Treatment == "control" & Dead == "Intact cytoplasm" ~ "Intact cytoplasm control",
+      Treatment == "control" & Dead == "Loss of cytoplasm" ~ "Condensed control",
+      Treatment == "artesunate" & Dead == "Intact cytoplasm" ~ "Intact cytoplasm artesunate",
+      Treatment == "artesunate" & Dead == "Loss of cytoplasm" ~ "Loss of cytoplasm artesunate"
+    )
+  )
+
+condition_colours <- c(
+  "Intact cytoplasm control" = "#F9918A",
+  "Loss of cytoplasm control" = "#B8B8B8",
+  "Intact cytoplasm artesunate" = "#08BC3E",
+  "Loss of cytoplasm artesunate" = "#777777"
+)
+
+
+
+# ----------------------------------------------------------------------
+# The first option for graphs simply compares treatments. Live/dead 
+# separation follows further down
+# ----------------------------------------------------------------------
+
+# Find the highest immune-cell count across both treatments (for graphs)
+y_max <- ceiling(
+  max(nucleus_data$Immune_cells, na.rm = TRUE) 
+) 
+
+
+# 3. Calculate median and IQR for each treatment
+summary_data <- nucleus_data %>%
+  group_by(Treatment, Distance) %>%
+  summarise(
+    median = median(Immune_cells, na.rm = TRUE),
+    Q1 = quantile(Immune_cells, 0.25, na.rm = TRUE),
+    Q3 = quantile(Immune_cells, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+
+# 4. CONTROL PLOT
+control_data <- nucleus_data %>%
+  filter(Treatment == "control")
+
+control_summary <- summary_data %>%
+  filter(Treatment == "control")
+
+
+p_control <- ggplot(
+  control_data,
+  aes(
+    x = Distance,
+    y = Immune_cells,
+    group = interaction(Mouse_id, img, Tumour_ROI),
+    # colour = interaction(Mouse_id, img, Tumour_ROI)
+  )
+) +
+  
+  # Individual tumour-cell trajectories
+  geom_line(
+    alpha = 0.35,
+    linewidth = 1.4
+  ) +
+  
+  # Individual observations
+  geom_point(
+    alpha = 0.55,
+    size = 1.8
+  ) +
+  
+  # Median
+  geom_point(
+    data = control_summary,
+    aes(
+      x = Distance,
+      y = median
+    ),
+    colour = "black",
+    size = 4,
+    inherit.aes = FALSE
+  ) +
+  
+  # IQR
+  geom_errorbar(
+    data = control_summary,
+    aes(
+      x = Distance,
+      ymin = Q1,
+      ymax = Q3
+    ),
+    colour = "black",
+    width = 0.12,
+    linewidth = 0.8,
+    inherit.aes = FALSE
+  ) +
+  
+  scale_colour_viridis_d(
+    option = "turbo"
+  ) +
+  
+  scale_y_continuous(
+    limits = c(0, y_max),
+    breaks = seq(0, y_max, by = 5),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  
+  labs(
+    title = "Control",
+    x = "Distance from tumour-cell nucleus (µm)",
+    y = "Number of CD45+ cells within the indicated distance",
+    colour = "Tumour cell"
+  ) +
+  
+  theme_classic() +
+  theme(
+    text = element_text(size = 20),
+    axis.title = element_text(size = 20),
+    axis.text = element_text(size = 20),
+    plot.title = element_text(size = 20),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20),
+    panel.grid.major.y = element_line(),
+    panel.grid.minor.y = element_blank()
+  )
+
+
+
+# 5. ARTESUNATE PLOT
+artesunate_data <- nucleus_data %>%
+  filter(Treatment == "artesunate")
+
+artesunate_summary <- summary_data %>%
+  filter(Treatment == "artesunate")
+
+
+p_artesunate <- ggplot(
+  artesunate_data,
+  aes(
+    x = Distance,
+    y = Immune_cells,
+    group = interaction(Mouse_id, img, Tumour_ROI),
+    # colour = interaction(Mouse_id, img, Tumour_ROI)
+  )
+) +
+  
+  # Individual tumour-cell trajectories
+  geom_line(
+    alpha = 0.35,
+    linewidth = 1.4
+  ) +
+  
+  # Individual observations
+  geom_point(
+    alpha = 0.55,
+    size = 1.8
+  ) +
+  
+  # Median
+  geom_point(
+    data = artesunate_summary,
+    aes(
+      x = Distance,
+      y = median
+    ),
+    colour = "black",
+    size = 4,
+    inherit.aes = FALSE
+  ) +
+  
+  # IQR
+  geom_errorbar(
+    data = artesunate_summary,
+    aes(
+      x = Distance,
+      ymin = Q1,
+      ymax = Q3
+    ),
+    colour = "black",
+    width = 0.12,
+    linewidth = 0.8,
+    inherit.aes = FALSE
+  ) +
+  
+  scale_colour_viridis_d(
+    option = "turbo"
+  ) +
+  
+  scale_y_continuous(
+    limits = c(0, y_max),
+    breaks = seq(0, y_max, by = 5),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  
+  labs(
+    title = "Artesunate",
+    x = "Distance from tumour-cell nucleus (µm)",
+    y = "Number of immune cells within the indicated distance",
+    colour = "Tumour cell"
+  ) +
+  
+  theme_classic() +
+  theme(
+    text = element_text(size = 20),
+    axis.title = element_text(size = 20),
+    axis.text = element_text(size = 20),
+    plot.title = element_text(size = 24),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20),
+    panel.grid.major.y = element_line(),
+    panel.grid.minor.y = element_blank()
+  )
+
+
+# 6. Display plots
+p_control
+p_artesunate
+
+
+
+# ------------------------------------------------------------------
+# Other way of displaying data follows, which includes the live/dead 
+# separation
+# ------------------------------------------------------------------
+
+
+# 3. Median and IQR
+
+summary_data <- nucleus_data %>%
+  group_by(Treatment, Dead, Distance) %>%
+  summarise(
+    median = median(Immune_cells, na.rm = TRUE),
+    Q1 = quantile(Immune_cells, 0.25, na.rm = TRUE),
+    Q3 = quantile(Immune_cells, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+# 4. Common y-axis
+
+y_max <- ceiling(
+  max(nucleus_data$Immune_cells, na.rm = TRUE) / 5
+) * 5
+
+
+# 5. Plot
+
+p <- ggplot(
+  nucleus_data,
+  aes(
+    x = Distance,
+    y = Immune_cells,
+    group = Tumour_ID,
+    colour = Condition
+  )
+) +
+  
+  # Individual tumour-cell trajectories
+  geom_line(
+    alpha = 0.30,
+    linewidth = 1.4
+  ) +
+  
+  # Individual measurements
+  geom_point(
+    alpha = 0.50,
+    size = 1.6
+  ) +
+  
+  # Median
+  geom_point(
+    data = summary_data,
+    aes(
+      x = Distance,
+      y = median
+    ),
+    colour = "black",
+    size = 4,
+    inherit.aes = FALSE
+  ) +
+  
+  # IQR
+  geom_errorbar(
+    data = summary_data,
+    aes(
+      x = Distance,
+      ymin = Q1,
+      ymax = Q3
+    ),
+    colour = "black",
+    width = 0.12,
+    linewidth = 0.8,
+    inherit.aes = FALSE
+  ) +
+  
+  scale_colour_manual(
+    values = condition_colours
+  ) +
+  
+  # Same y-axis across every panel
+  scale_y_continuous(
+    limits = c(0, y_max),
+    breaks = seq(0, y_max, by = 5),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  
+  # Separate treatment columns and alive/dead rows
+  facet_grid(
+    Dead ~ Treatment
+  ) +
+  
+  labs(
+    x = "Distance from tumour-cell nucleus (µm)",
+    y = "Number of immune cells within the indicated distance",
+    # colour = "Mouse"
+  ) +
+  
+  theme_classic() +
+  
+  theme(
+    text = element_text(size = 20),
+    axis.title = element_text(size = 20),
+    axis.text = element_text(size = 20),
+    strip.text = element_text(size = 20),
+    panel.grid.major.y = element_line(),
+    panel.grid.minor.y = element_blank(),
+    legend.position = "none"
+  )
+
+
+# Display
+p
+
