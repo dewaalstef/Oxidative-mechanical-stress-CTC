@@ -1,0 +1,350 @@
+# This analysis is intended to be used in tandem with ImageJ macro 'Macro_Puncta_segmentation_v2.imj'
+# because it utilizes the ROI .zip files containing the following groups created by the segmentation:
+# Group 1 = cells
+# Group 2 = puncta
+# And it uses the metadata .txt file created by that ImageJ macro script too
+# These ROI .zip files and metadata .txt have to be present in the same directory as the image
+# you select below
+
+import os
+import numpy as np
+import pandas as pd
+import tifffile as tiff
+import roifile
+from tkinter import Tk, filedialog
+
+from skimage.draw import polygon
+from skimage.measure import regionprops
+
+
+# --------------------------------------------------
+# SELECT FILE LOCATIONS 
+# --------------------------------------------------
+
+Tk().withdraw()
+
+image_path = filedialog.askopenfilename(
+    title="Select MIP image",
+    filetypes=[
+        ("TIFF files", "*.tif *.tiff"),
+        ("All files", "*.*")
+    ]
+)
+
+if not image_path:
+    raise ValueError("No image selected")
+
+image_folder = os.path.dirname(image_path)
+
+roi_folder = os.path.join(
+    image_folder,
+    "Roi_Sets"
+)
+
+
+if not os.path.exists(roi_folder):
+    raise FileNotFoundError(
+        "No Roi_Sets folder found next to image"
+    )
+
+
+image_base = os.path.splitext(
+    os.path.basename(image_path)
+)[0]
+
+
+roi_path = os.path.join(
+    roi_folder,
+    image_base + "_ROIs.zip"
+)
+
+
+metadata_path = roi_path.replace(
+    "_ROIs.zip",
+    "_metadata.txt"
+)
+
+
+if not os.path.exists(roi_path):
+    raise FileNotFoundError(
+        "Matching ROI ZIP not found:\n" + roi_path
+    )
+
+
+if not os.path.exists(metadata_path):
+    raise FileNotFoundError(
+        "Matching metadata file not found:\n" + metadata_path
+    )
+
+
+
+# --------------------------------------------------
+# LOAD IMAGE
+# --------------------------------------------------
+
+img = tiff.imread(image_path)
+
+# If needed for multi-channel TIFFs:
+# img = img[0]
+
+
+# --------------------------------------------------
+# READ CELL COUNT METADATA
+# --------------------------------------------------
+
+def read_cell_count(path):
+
+    with open(path, "r") as f:
+        for line in f:
+            if line.startswith("CellCount"):
+                return int(line.split("=")[1])
+
+    raise ValueError("CellCount not found in metadata file")
+
+
+CellCount = read_cell_count(metadata_path)
+
+print("Cells:", CellCount)
+
+
+# --------------------------------------------------
+# LOAD IMAGEJ ROI ZIP
+# --------------------------------------------------
+
+def load_rois(zip_path):
+
+    roi_objects = roifile.roiread(zip_path)
+
+    return roi_objects
+
+
+rois = load_rois(roi_path)
+
+print("Total ROIs:", len(rois))
+
+
+cells = rois[:CellCount]
+puncta = rois[CellCount:]
+
+
+with tiff.TiffFile(image_path) as tif:
+
+    img = tif.asarray()
+
+    xres_num, xres_den = tif.pages[0].tags["XResolution"].value
+
+    pixels_per_um = xres_num / xres_den
+
+    pixel_size_um = 1 / pixels_per_um
+    pixel_area_um2 = pixel_size_um ** 2
+
+print(f"{pixels_per_um:.4f} pixels/µm")
+print(f"{pixel_size_um:.5f} µm/pixel")
+# --------------------------------------------------
+# CONVERT ROI TO MASK
+# --------------------------------------------------
+
+def roi_to_mask(roi, shape):
+
+    coords = roi.coordinates()
+
+    mask = np.zeros(shape, dtype=bool)
+
+    rr, cc = polygon(
+        coords[:,1],
+        coords[:,0],
+        shape
+    )
+
+    mask[rr, cc] = True
+
+    return mask
+
+
+
+# --------------------------------------------------
+# CREATE CELL MASKS
+# --------------------------------------------------
+
+cell_masks = []
+
+for cell in cells:
+    cell_masks.append(
+        roi_to_mask(cell, img.shape)
+    )
+
+
+# --------------------------------------------------
+# ANALYZE EACH CELL
+# --------------------------------------------------
+
+results = []
+
+for cell_id, cell_mask in enumerate(cell_masks):
+
+    puncta_count = 0
+    puncta_area = 0
+    puncta_intensity = []
+    puncta_intden = 0
+
+
+    # Cell measurements
+
+    cell_area_px = cell_mask.sum()
+    cell_area_um2 = cell_area_px * pixel_area_um2
+
+    cell_raw_intden = img[cell_mask].sum()
+    cell_mean_intensity = img[cell_mask].mean()
+
+
+    # Analyse puncta within this cell
+
+    for punct in puncta:
+
+        punct_mask = roi_to_mask(
+            punct,
+            img.shape
+        )
+
+        # determine punctum centroid
+
+        coords = np.argwhere(punct_mask)
+
+        if len(coords) == 0:
+            continue
+
+        centroid_y = int(coords[:,0].mean())
+        centroid_x = int(coords[:,1].mean())
+
+
+        # assign punctum to cell
+
+        if cell_mask[centroid_y, centroid_x]:
+
+            puncta_count += 1
+
+            area_px = punct_mask.sum()
+
+            puncta_area += area_px
+
+            puncta_intden += img[punct_mask].sum()
+
+            puncta_intensity.extend(
+                img[punct_mask]
+            )
+
+
+    # Convert puncta area to µm²
+
+    total_puncta_area_um2 = (
+        puncta_area * pixel_area_um2
+    )
+
+
+    # Calculate final metrics
+
+    if puncta_count > 0:
+
+        mean_puncta_area_um2 = (
+            total_puncta_area_um2 / puncta_count
+        )
+
+        mean_puncta_intensity = (
+            np.mean(puncta_intensity)
+        )
+
+    else:
+
+        mean_puncta_area_um2 = 0
+
+        mean_puncta_intensity = 0
+
+
+
+    # Save results
+
+    results.append({
+
+        "Cell_ID": cell_id,
+
+
+        # Cell measurements
+
+        "Cell_Area_um2": cell_area_um2,
+
+        "Cell_Mean_Intensity": cell_mean_intensity,
+
+        "Cell_RawIntDen": cell_raw_intden,
+
+
+        # Puncta measurements
+
+        "Puncta_Count": puncta_count,
+
+        "Puncta_Density_per_um2":
+            puncta_count / cell_area_um2
+            if cell_area_um2 > 0
+            else 0,
+
+
+        "Total_Puncta_Area_um2":
+            total_puncta_area_um2,
+
+
+        "Mean_Puncta_Area_um2":
+            mean_puncta_area_um2,
+
+
+        "Mean_Puncta_Intensity":
+            mean_puncta_intensity,
+
+
+        "Puncta_RawIntDen":
+            puncta_intden,
+
+
+        # Derived metrics
+
+        "Fraction_Puncta_Area_percent":
+            (total_puncta_area_um2 / cell_area_um2) * 100
+            if cell_area_um2 > 0
+            else 0,
+
+
+        "Fraction_Puncta_Signal_percent":
+            (puncta_intden / cell_raw_intden) * 100
+            if cell_raw_intden > 0
+            else 0
+
+    })
+
+
+# --------------------------------------------------
+# SAVE RESULTS
+# --------------------------------------------------
+
+df = pd.DataFrame(results)
+
+
+output_folder = os.path.dirname(roi_path)
+
+
+base = os.path.basename(
+    roi_path
+).replace("_ROIs.zip", "")
+
+
+output_path = os.path.join(
+    output_folder,
+    base + "_puncta_analysis.csv"
+)
+
+
+df.to_excel(
+    output_path.replace(".csv", ".xlsx"),
+    index=False
+)
+
+
+print("Finished:")
+print(output_path.replace(".csv", ".xlsx"))
