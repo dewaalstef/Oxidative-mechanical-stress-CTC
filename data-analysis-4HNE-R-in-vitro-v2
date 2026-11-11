@@ -1,0 +1,715 @@
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(FSA)
+
+# add directory
+excel_directory = [...]
+
+Data_analysis_4HNE <- read_excel(excel_directory, sheet = "Puncta-data")
+View(Data_analysis_4HNE)
+
+# Combine the original experiment replicate and image scan into one grouping ID.
+# Example: Replicate = 1 and Scan = 1 becomes "Rep1_Scan1".
+
+Data_analysis_4HNE <- Data_analysis_4HNE %>%
+  mutate(
+    Replicate_Scan = paste0("Rep", Replicate, "_Scan", Scan)
+  )
+
+View(Data_analysis_4HNE)
+
+
+
+# CTRL+SHIFT+C FOR COMMENT/UNCOMMENT THE SECTIONS BELOW
+# 
+# # isolate original experiment replicates
+# Data_analysis_4HNE <- Data_analysis_4HNE[
+#   Data_analysis_4HNE$Replicate != 1,
+# ]
+
+
+# ------------------------------------------------------------
+# Significance markers
+# ------------------------------------------------------------
+
+# TRUE  = show significant Tukey comparisons on plots
+# FALSE = omit significance brackets and markers
+
+show_significance <- TRUE
+
+
+# SET EXCLUDED TREATMENTS
+# excluded_treatments <- NULL to maintain all
+
+excluded_treatments <- c(
+  "Artesunate-500µM+H2O2-1mM-secondary_only",
+  "NAC-1mM+H2O2-1mM-secondary_only",
+  "RPMI-control_secondary-only",
+  "4-HNE-30µM",
+  "NAC-1mM+H2O2-1mM"
+)
+
+Data_analysis_4HNE <- Data_analysis_4HNE %>%
+  dplyr::filter(
+    !is.na(.data$Treatment),
+    !.data$Treatment %in% excluded_treatments
+  )
+
+# set order and outcomes
+
+treatment_order <- c(
+  "RPMI-control",
+  "0.3%-DMSO",
+  "4-HNE-10µM",
+  # "4-HNE-30µM",
+  "Artesunate-500µM",
+  "Artesunate-500µM+H2O2-1mM",
+  "H2O2-1mM"
+  # "NAC-1mM+H2O2-1mM"
+)
+
+
+treatment_colours <- c(
+  "RPMI-control" = "#F9918A",
+  "0.3%-DMSO" = "#f0c1bd",
+  "4-HNE-10µM" = "#888888",
+  # "4-HNE-30µM" = "#D55E00",
+  "Artesunate-500µM" = "#08BC3E",
+  "Artesunate-500µM+H2O2-1mM" = "#87c49a",
+  "H2O2-1mM" = "#F0EBF2"
+  # "NAC-1mM+H2O2-1mM" = "#000000"
+)
+
+Data_analysis_4HNE$Treatment <- factor(
+  Data_analysis_4HNE$Treatment,
+  levels = treatment_order
+)
+
+outcomes <- c(
+  "Cell_Area_um2",
+  "Cell_Mean_Intensity",
+  "Cell_RawIntDen",
+  "Puncta_Count",
+  "Puncta_Density_per_um2",
+  "Total_Puncta_Area_um2",
+  "Mean_Puncta_Area_um2",
+  "Mean_Puncta_Intensity",
+  "Puncta_RawIntDen",
+  "Fraction_Puncta_Area_percent",
+  "Fraction_Puncta_Signal_percent"
+)
+
+
+plot_single_cell <- function(outcome_name) {
+  
+  ggplot(
+    Data_analysis_4HNE,
+    aes(
+      x = Treatment,
+      y = .data[[outcome_name]]
+    )
+  ) +
+    
+    # Violin
+    geom_violin(
+      fill = "lightblue",
+      alpha = 0.4,
+      trim = FALSE
+    ) +
+    
+    # Boxplot
+    geom_boxplot(
+      width = 0.12,
+      coef = Inf,
+      outlier.shape = NA,
+      fill = "white"
+    ) +
+    
+    # Mean
+    stat_summary(
+      fun = mean,
+      geom = "point",
+      shape = 18,
+      size = 3,
+      color = "red"
+    ) +
+    
+    # Individual observations
+    geom_jitter(
+      aes(color = Treatment),
+      width = 0.12,
+      height = 0,
+      alpha = 0.7,
+      size = 1.8
+    ) +
+    
+    # Same treatment colors used everywhere
+    scale_color_manual(
+      values = treatment_colours
+    ) +
+    
+    labs(
+      title = outcome_name,
+      x = "Treatment",
+      y = outcome_name
+    ) +
+    
+    theme_minimal() +
+    
+    theme(
+      # Gridlines
+      panel.grid.major.x = element_line(
+        colour = "grey75",
+        linewidth = 0.5
+      ),
+      panel.grid.major.y = element_line(
+        colour = "grey75",
+        linewidth = 0.5
+      ),
+      panel.grid.minor = element_blank(),
+      
+      # Axis lines
+      axis.line = element_line(
+        colour = "black",
+        linewidth = 0.8
+      ),
+      axis.ticks = element_line(
+        colour = "black",
+        linewidth = 0.6
+      ),
+      
+      # Axis text
+      axis.text.x = element_text(
+        size = 12,
+        angle = 45,
+        hjust = 1
+      ),
+      axis.text.y = element_text(
+        size = 14
+      ),
+      
+      # Axis titles
+      axis.title.x = element_text(
+        size = 16
+      ),
+      axis.title.y = element_text(
+        size = 16
+      ),
+      
+      legend.position = "none"
+    )
+}
+
+plot_single_cell("Cell_Area_um2")
+plot_single_cell("Cell_Mean_Intensity")
+plot_single_cell("Cell_RawIntDen")
+plot_single_cell("Puncta_Count")
+plot_single_cell("Puncta_Density_per_um2")
+plot_single_cell("Total_Puncta_Area_um2")
+plot_single_cell("Mean_Puncta_Area_um2")
+plot_single_cell("Mean_Puncta_Intensity")
+plot_single_cell("Puncta_RawIntDen")
+plot_single_cell("Fraction_Puncta_Area_percent")
+plot_single_cell("Fraction_Puncta_Signal_percent")
+
+
+
+# Aspect ratio by high intensity yes (1)/no (2)  
+library(ggplot2)
+ggplot(Data_analysis_4HNE,
+       aes(x = Mean_Puncta_Intensity_High, y = Aspect_Ratio)) +
+  
+  # Violin
+  geom_violin(fill = "lightblue",
+              alpha = 0.4,
+              trim = FALSE) +
+  
+  # Boxplot
+  geom_boxplot(width = 0.12,
+               coef = Inf,        # whiskers extend to min/max
+               outlier.shape = NA,
+               fill = "white") +
+  
+  # Mean
+  stat_summary(fun = mean,
+               geom = "point",
+               shape = 18,        # diamond
+               size = 3,
+               color = "red") +
+  
+  # Individual observations
+  geom_jitter(aes(color = Mean_Puncta_Intensity_High),
+              width = 0.12,
+              height = 0,
+              alpha = 0.7,
+              size = 1.8) +
+  
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 20, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 20),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    legend.position = "none"
+  )
+
+
+# Correlation aspect ratio / signal%
+
+model <- lm(Fraction_Puncta_Signal_percent ~ Aspect_Ratio * Mean_Puncta_Intensity, data = Data_analysis_4HNE)
+
+summary(model)
+
+
+library(ggplot2)
+
+ggplot(Data_analysis_4HNE,
+       aes(x = Fraction_Puncta_Signal_percent,
+           y = Aspect_Ratio,
+           color = Mean_Puncta_Intensity_High)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE)
+
+
+# Correlation aspect ratio / area%
+
+model <- lm(Fraction_Puncta_Area_percent ~ Aspect_Ratio * Mean_Puncta_Intensity, data = Data_analysis_4HNE)
+
+summary(model)
+
+
+library(ggplot2)
+
+ggplot(Data_analysis_4HNE,
+       aes(x = Fraction_Puncta_Area_percent,
+           y = Aspect_Ratio,
+           color = Mean_Puncta_Intensity_High)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE)
+
+
+
+# Cell intensity / aspect ratio
+model <- lm(Cell_Mean_Intensity ~ Aspect_Ratio * Mean_Puncta_Intensity, data = Data_analysis_4HNE)
+
+summary(model)
+library(ggplot2)
+
+ggplot(Data_analysis_4HNE,
+       aes(x = Cell_Mean_Intensity,
+           y = Aspect_Ratio,
+           color = Mean_Puncta_Intensity_High)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE)
+
+
+
+# ------------------------------------------------------------
+# Statistical analysis for all outcomes
+# 1. Fit outcome ~ Treatment and test residual normality (Shapiro-Wilk)
+# 2. Approximately normal residuals: one-way ANOVA + Tukey HSD
+# 3. Non-normal residuals: Kruskal-Wallis + Dunn test (Holm adjustment)
+# ------------------------------------------------------------
+
+library(FSA)       # dunnTest
+
+# Use only rows with a treatment and a non-missing value for the outcome.
+run_statistical_test <- function(outcome_name, data = Data_analysis_4HNE) {
+  dat <- data %>%
+    dplyr::select(Treatment, all_of(outcome_name)) %>%
+    dplyr::rename(Value = all_of(outcome_name)) %>%
+    dplyr::filter(!is.na(Treatment), !is.na(Value)) %>%
+    droplevels()
+
+  if (n_distinct(dat$Treatment) < 2) {
+    warning("Skipping ", outcome_name, ": fewer than two treatment groups with data.")
+    return(list(
+      omnibus = tibble(Outcome = outcome_name, Test = NA_character_,
+                       Residual_Shapiro_p = NA_real_, p.value = NA_real_),
+      pairwise = tibble(Outcome = character(), group1 = character(),
+                        group2 = character(), p.value = numeric(),
+                        Method = character())
+    ))
+  }
+
+  # Use short internal group labels so treatment names containing hyphens
+  # do not make pairwise-comparison labels ambiguous.
+  treatment_labels <- unique(as.character(dat$Treatment))
+  internal_labels <- paste0("Group", seq_along(treatment_labels))
+  label_map <- stats::setNames(treatment_labels, internal_labels)
+  dat$Treatment_test <- factor(
+    as.character(dat$Treatment),
+    levels = treatment_labels,
+    labels = internal_labels
+  )
+
+  # Residual normality is assessed from the one-way linear model.
+  lm_model <- lm(Value ~ Treatment_test, data = dat)
+  residuals_model <- residuals(lm_model)
+  shapiro_p <- if (length(residuals_model) >= 3 &&
+                   length(residuals_model) <= 5000 &&
+                   sd(residuals_model) > 0) {
+    shapiro.test(residuals_model)$p.value
+  } else {
+    NA_real_
+  }
+
+  # If Shapiro-Wilk cannot be computed, use the non-parametric branch conservatively.
+  use_anova <- !is.na(shapiro_p) && shapiro_p >= 0.05
+
+  if (use_anova) {
+    aov_model <- aov(Value ~ Treatment_test, data = dat)
+    aov_table <- summary(aov_model)[[1]]
+    omnibus_p <- aov_table[["Pr(>F)"]][1]
+
+    tukey_table <- as.data.frame(TukeyHSD(aov_model, "Treatment_test")$Treatment_test)
+    tukey_table$contrast <- rownames(tukey_table)
+    pairwise <- tibble(
+      Outcome = outcome_name,
+      group1 = unname(label_map[sub("-.*$", "", tukey_table$contrast)]),
+      group2 = unname(label_map[sub("^.*-", "", tukey_table$contrast)]),
+      p.value = tukey_table$`p adj`,
+      Method = "Tukey"
+    )
+    test_name <- "One-way ANOVA"
+  } else {
+    kw <- kruskal.test(Value ~ Treatment_test, data = dat)
+    omnibus_p <- kw$p.value
+
+    dunn_result <- FSA::dunnTest(Value ~ Treatment_test, data = dat, method = "holm")$res
+    pairwise <- tibble(
+      Outcome = outcome_name,
+      group1 = unname(label_map[sub(" - .*", "", dunn_result$Comparison)]),
+      group2 = unname(label_map[sub("^.* - ", "", dunn_result$Comparison)]),
+      p.value = dunn_result$P.adj,
+      Method = "Dunn-Holm"
+    )
+    test_name <- "Kruskal-Wallis"
+  }
+
+  list(
+    omnibus = tibble(
+      Outcome = outcome_name,
+      Test = test_name,
+      Residual_Shapiro_p = shapiro_p,
+      p.value = omnibus_p
+    ),
+    pairwise = pairwise
+  )
+}
+
+statistical_results <- lapply(outcomes, run_statistical_test)
+
+# Omnibus test results and Benjamini-Hochberg FDR correction across outcomes.
+anova_results <- dplyr::bind_rows(lapply(statistical_results, `[[`, "omnibus")) %>%
+  mutate(
+    p_adjusted = p.adjust(p.value, method = "BH"),
+    significant_FDR = !is.na(p_adjusted) & p_adjusted < 0.05
+  )
+
+# Pairwise comparisons. Tukey-adjusted p-values are used for ANOVA outcomes;
+# Holm-adjusted p-values are used for Dunn tests following Kruskal-Wallis.
+pairwise_results <- dplyr::bind_rows(lapply(statistical_results, `[[`, "pairwise"))
+
+View(anova_results)
+View(pairwise_results)
+
+# Check differences between replicates manually
+# replicate_difference <- Data_analysis_4HNE %>%
+#   group_by(Treatment, Replicate_Scan) %>%
+#   summarise(
+#     mean_value = mean(Cell_Mean_Intensity, na.rm = TRUE),
+#     .groups = "drop"
+#   ) %>%
+#   pivot_wider(
+#     names_from = Replicate_Scan,
+#     values_from = mean_value,
+#     names_prefix = "Replicate_Scan_"
+#   ) %>%
+#   mutate(
+#     Rep2_minus_Rep1 = Replicate_2 - Replicate_1,
+#     Percent_change = (Replicate_2 - Replicate_1) / Replicate_1 * 100
+#   )
+# 
+# replicate_difference
+
+
+
+# Plot graphs as means per Replicate + Scan combination with significance
+
+# Calculate means per Treatment and combined Replicate_Scan group.
+replicate_means <- Data_analysis_4HNE %>%
+  group_by(Treatment, Replicate_Scan) %>%
+  summarise(
+    across(all_of(outcomes), ~ mean(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+plot_data <- replicate_means %>%
+  pivot_longer(
+    cols = all_of(outcomes),
+    names_to = "Outcome",
+    values_to = "Value"
+  ) %>%
+  mutate(Treatment = factor(Treatment, levels = treatment_order))
+
+# Normalize each Replicate_Scan group to its own RPMI-control value.
+replicate_means_normalised <- replicate_means %>%
+  group_by(Replicate_Scan) %>%
+  mutate(
+    across(
+      all_of(outcomes),
+      ~ {
+        control_value <- .x[Treatment == "RPMI-control"]
+        if (length(control_value) == 0 || is.na(control_value[1]) || control_value[1] == 0) {
+          NA_real_
+        } else {
+          .x / control_value[1] * 100
+        }
+      }
+    )
+  ) %>%
+  ungroup()
+
+plot_data_normalised <- replicate_means_normalised %>%
+  pivot_longer(
+    cols = all_of(outcomes),
+    names_to = "Outcome",
+    values_to = "Value"
+  ) %>%
+  mutate(Treatment = factor(Treatment, levels = treatment_order))
+
+# Significant pairwise comparisons from the appropriate test for each outcome.
+if (show_significance) {
+  sig_comparisons <- pairwise_results %>%
+    filter(!is.na(p.value), p.value < 0.05) %>%
+    mutate(
+      significance = case_when(
+        p.value < 0.0001 ~ "****",
+        p.value < 0.001  ~ "***",
+        p.value < 0.01   ~ "**",
+        p.value < 0.05   ~ "*"
+      )
+    )
+} else {
+  sig_comparisons <- tibble()
+}
+
+# Function to create plot
+plot_outcome <- function(outcome_name) {
+  
+  # Data for this outcome
+  dat <- plot_data_normalised %>%
+    filter(Outcome == outcome_name)
+  
+  if (nrow(dat) == 0) {
+    stop(
+      paste0(
+        "No data found for outcome: ",
+        outcome_name,
+        "\nCheck that the outcome name exactly matches your data."
+      )
+    )
+  }
+  
+  # Mean and SD across the Replicate + Scan combinations
+  summary_dat <- dat %>%
+    group_by(Treatment) %>%
+    summarise(
+      mean_value = mean(Value, na.rm = TRUE),
+      sd_value = sd(Value, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  if (all(is.na(summary_dat$mean_value))) {
+    stop(
+      paste0(
+        "All values are NA for outcome: ",
+        outcome_name,
+        ". Check the outcome column in Data_analysis_4HNE."
+      )
+    )
+  }
+  
+  # Significant Tukey comparisons for this outcome
+  if (show_significance) {
+    
+    sig_dat <- sig_comparisons %>%
+      filter(Outcome == outcome_name) %>%
+      filter(
+        group1 %in% treatment_order,
+        group2 %in% treatment_order
+      ) %>%
+      mutate(
+        x1 = match(group1, treatment_order),
+        x2 = match(group2, treatment_order)
+      ) %>%
+      arrange(x1, x2)
+    
+  } else {
+    
+    sig_dat <- tibble()
+    
+  }
+  
+  # Set y-position for significance brackets
+  if (nrow(sig_dat) > 0) {
+    
+    y_max <- max(summary_dat$mean_value + summary_dat$sd_value,
+                 na.rm = TRUE)
+    
+    y_range <- y_max - min(summary_dat$mean_value, na.rm = TRUE)
+    
+    if (y_range == 0) {
+      y_range <- y_max
+    }
+    
+    sig_dat <- sig_dat %>%
+      mutate(
+        y_position = y_max + row_number() * y_range * 0.10
+      )
+  }
+  
+  # Plot
+  p <- ggplot(summary_dat,
+              aes(x = Treatment, y = mean_value)) +
+    
+    geom_col(
+      aes(fill = Treatment),
+      width = 0.7,
+      colour = "black"
+    ) +
+    
+    geom_errorbar(
+      aes(
+        ymin = mean_value - sd_value,
+        ymax = mean_value + sd_value
+      ),
+      width = 0.2
+    ) +
+    
+    # Individual Replicate + Scan means:
+    # treatment-coloured dots with a black outline for contrast
+    geom_point(
+      data = dat,
+      aes(
+        x = Treatment,
+        y = Value,
+        fill = Treatment
+      ),
+      shape = 21,
+      colour = "black",
+      stroke = 0.7,
+      position = position_jitter(
+        width = 0.08,
+        height = 0
+      ),
+      size = 3
+    ) +
+    
+    # Use treatment colours for both bars and dots.
+    # Treatments without a defined colour (e.g. NAC, if retained) appear grey.
+    scale_fill_manual(
+      values = treatment_colours,
+      na.value = "grey70"
+    ) +
+    
+    labs(
+      title = outcome_name,
+      x = NULL,
+      y = "Relative to RPMI control (%)"
+    ) +
+    
+    theme_classic(base_size = 16) +
+    theme(
+      axis.line = element_line(
+        colour = "black",
+        linewidth = 1
+      ),
+      axis.ticks = element_line(
+        colour = "black",
+        linewidth = 0.8
+      ),
+      axis.ticks.length = unit(0.2, "cm"),
+      axis.text.x = element_text(
+        angle = 45,
+        hjust = 1
+      ),
+      plot.title = element_text(
+        face = "bold"
+      )
+    )
+  
+  # Add significance brackets if there are any
+  if (nrow(sig_dat) > 0) {
+    
+    p <- p +
+      geom_segment(
+        data = sig_dat,
+        aes(
+          x = x1,
+          xend = x2,
+          y = y_position,
+          yend = y_position
+        ),
+        inherit.aes = FALSE
+      ) +
+      
+      geom_segment(
+        data = sig_dat,
+        aes(
+          x = x1,
+          xend = x1,
+          y = y_position,
+          yend = y_position -
+            (max(summary_dat$mean_value,
+                 na.rm = TRUE) * 0.02)
+        ),
+        inherit.aes = FALSE
+      ) +
+      
+      geom_segment(
+        data = sig_dat,
+        aes(
+          x = x2,
+          xend = x2,
+          y = y_position,
+          yend = y_position -
+            (max(summary_dat$mean_value,
+                 na.rm = TRUE) * 0.02)
+        ),
+        inherit.aes = FALSE
+      ) +
+      
+      geom_text(
+        data = sig_dat,
+        aes(
+          x = (x1 + x2) / 2,
+          y = y_position,
+          label = significance
+        ),
+        vjust = -0.3,
+        inherit.aes = FALSE,
+        size = 5
+      )
+  }
+  
+  p
+}
+
+
+# Create plots
+plot_outcome("Cell_Area_um2")
+plot_outcome("Cell_Mean_Intensity")
+plot_outcome("Cell_RawIntDen")
+plot_outcome("Puncta_Count")
+plot_outcome("Puncta_Density_per_um2")
+plot_outcome("Total_Puncta_Area_um2")
+plot_outcome("Mean_Puncta_Area_um2")
+plot_outcome("Mean_Puncta_Intensity")
+plot_outcome("Puncta_RawIntDen")
+plot_outcome("Fraction_Puncta_Area_percent")
+plot_outcome("Fraction_Puncta_Signal_percent")
