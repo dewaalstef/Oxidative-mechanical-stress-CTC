@@ -1,0 +1,235 @@
+# ============================================================
+# ANTIBODY SENSITIVITY / SPECIFICITY: POST-AVERAGING BACKGROUND SUBTRACTION
+# ============================================================
+# Workflow for every outcome:
+#   1. Average all available cell measurements within Mouse x Antibody
+#      (pooling across timepoints and nuclear states; neither is analyzed).
+#   2. Subtract the corresponding control mean for each mouse:
+#        rabbit_corrected = mean(rabbit) - mean(rabbit_control)
+#        goat_corrected   = mean(goat)   - mean(goat_control)
+#   3. Compare the corrected rabbit and goat values across mice.
+#
+
+# ============================================================
+# 1. LOAD PACKAGES
+# ============================================================
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(FSA)
+library(stringr)
+library(purrr)
+
+# ============================================================
+# 2. LOAD DATA
+# ============================================================
+
+# add directory
+excel_directory = [...]
+Analysis <- read_excel(
+  excel_directory,
+  sheet = "Data-main"
+)
+
+# Filtering settings
+antibodies_to_include <- c("rabbit", "rabbit_control", "goat", "goat_control")
+treatment_to_include <- "artesunate"
+exclude_puncta_area_outliers <- FALSE
+puncta_area_outlier_threshold <- 50
+cell_area_min <- NULL
+cell_area_max <- 750
+exclude_zero_puncta_intensity <- FALSE
+min_observations_per_mouse <- 3
+
+# Plot settings
+show_only_significant_bars <- TRUE
+alpha_significance <- 0.05
+
+required_columns <- c(
+  "Antibody",
+  "Mouse",
+  "Cell_Area_um2",
+  "Treatment"
+)
+
+missing_columns <- setdiff(
+  required_columns,
+  names(Analysis)
+)
+
+if (length(missing_columns) > 0) {
+  stop(
+    "Missing required columns in Analysis: ",
+    paste(missing_columns, collapse = ", ")
+  )
+}
+
+Analysis <- Analysis %>%
+  mutate(
+    Antibody = as.character(Antibody),
+    Mouse = as.factor(Mouse),
+    Treatment = as.character(Treatment)
+  ) %>%
+  filter(
+    Antibody %in% antibodies_to_include,
+    Treatment == treatment_to_include
+  ) %>%
+  mutate(
+    Antibody = factor(
+      Antibody,
+      levels = antibodies_to_include
+    )
+  )
+
+if (nrow(Analysis) == 0) {
+  stop(
+    "No rows remain after filtering to the selected antibody groups and treatment."
+  )
+}
+
+if (exclude_puncta_area_outliers && "Mean_Puncta_Area_um2" %in% names(Analysis)) {
+  Analysis <- Analysis %>% filter(is.na(Mean_Puncta_Area_um2) | Mean_Puncta_Area_um2 <= puncta_area_outlier_threshold)
+}
+if (!is.null(cell_area_min)) Analysis <- Analysis %>% filter(is.na(Cell_Area_um2) | Cell_Area_um2 >= cell_area_min)
+if (!is.null(cell_area_max)) Analysis <- Analysis %>% filter(is.na(Cell_Area_um2) | Cell_Area_um2 < cell_area_max)
+if (exclude_zero_puncta_intensity && "Mean_Puncta_Intensity" %in% names(Analysis)) {
+  Analysis$Mean_Puncta_Intensity[Analysis$Mean_Puncta_Intensity == 0] <- NA_real_
+}
+
+mouse_counts <- Analysis %>% count(Mouse, name = "n_observations")
+excluded_mice <- mouse_counts %>% filter(n_observations < min_observations_per_mouse)
+if (nrow(excluded_mice) > 0) {
+  Analysis <- Analysis %>% filter(!Mouse %in% excluded_mice$Mouse)
+  message("Excluded ", nrow(excluded_mice), " mice with fewer than ", min_observations_per_mouse, " cell observations.")
+}
+if (nrow(Analysis) == 0) stop("No observations remain after filtering.")
+
+continuous_outcomes <- c(
+  "Cell_Area_um2", "Cell_Mean_Intensity", "Cell_RawIntDen", "Puncta_Count",
+  "Puncta_Density_per_um2", "Total_Puncta_Area_um2", "Mean_Puncta_Area_um2",
+  "Mean_Puncta_Intensity", "Puncta_RawIntDen", "Fraction_Puncta_Area_percent",
+  "Fraction_Puncta_Signal_percent"
+)
+continuous_outcomes <- continuous_outcomes[continuous_outcomes %in% names(Analysis)]
+if (!length(continuous_outcomes)) stop("None of the configured outcomes were found in Analysis.")
+
+p_to_stars <- function(p) case_when(
+  is.na(p) ~ "", p < 0.001 ~ "***", p < 0.01 ~ "**", p < 0.05 ~ "*", TRUE ~ "ns"
+)
+
+# 1. Average all retained cells first: one value per mouse and antibody.
+# Timepoints and nuclear states are intentionally pooled and not analyzed.
+mouse_means <- Analysis %>%
+  group_by(Mouse, Antibody) %>%
+  summarise(
+    across(all_of(continuous_outcomes), ~ if (all(is.na(.x))) NA_real_ else mean(.x, na.rm = TRUE)),
+    n_cells = n(),
+    .groups = "drop"
+  )
+
+# 2. Subtract matched control means after averaging.
+# Pivot wider so each mouse's normal and control means are aligned.
+corrected_signal_list <- map(continuous_outcomes, function(outcome_name) {
+  wide <- mouse_means %>%
+    select(Mouse, Antibody, Value = all_of(outcome_name)) %>%
+    pivot_wider(names_from = Antibody, values_from = Value)
+
+  wide %>% mutate(
+    Outcome = outcome_name,
+    rabbit_corrected = rabbit - rabbit_control,
+    goat_corrected = goat - goat_control
+  )
+})
+corrected_signals_wide <- bind_rows(corrected_signal_list)
+corrected_signals <- corrected_signals_wide %>%
+  select(Mouse, Outcome, rabbit_corrected, goat_corrected) %>%
+  pivot_longer(c(rabbit_corrected, goat_corrected), names_to = "Antibody", values_to = "Corrected_signal") %>%
+  mutate(Antibody = recode(Antibody,
+    rabbit_corrected = "Rabbit (rabbit - rabbit_control)",
+    goat_corrected = "Goat (goat - goat_control)"
+  ))
+
+# 3. Test whether corrected signal differs from zero and compare rabbit vs goat.
+# Paired tests are used for rabbit-vs-goat because both corrected signals are
+# calculated for the same mouse. Wilcoxon signed-rank tests avoid treating cells
+# as independent biological replicates.
+run_corrected_tests <- function(outcome_name) {
+  dat <- corrected_signals_wide %>% filter(Outcome == outcome_name)
+  empty <- tibble(Outcome = character(), Comparison = character(),
+                  n_mice = integer(), Estimate = numeric(), p_value = numeric())
+  if (nrow(dat) == 0) return(empty)
+  out <- list()
+
+  for (grp in c("rabbit_corrected", "goat_corrected")) {
+    vals <- dat[[grp]]
+    vals <- vals[is.finite(vals)]
+    if (length(vals) >= 2) {
+      tst <- tryCatch(wilcox.test(vals, mu = 0, exact = FALSE), error = function(e) NULL)
+      if (!is.null(tst)) out[[length(out) + 1]] <- tibble(
+        Outcome = outcome_name,
+        Comparison = ifelse(grp == "rabbit_corrected", "Rabbit corrected signal vs 0", "Goat corrected signal vs 0"),
+        n_mice = length(vals), Estimate = median(vals), p_value = tst$p.value
+      )
+    }
+  }
+
+  paired <- dat %>% filter(is.finite(rabbit_corrected), is.finite(goat_corrected))
+  if (nrow(paired) >= 2) {
+    delta <- paired$rabbit_corrected - paired$goat_corrected
+    tst <- tryCatch(wilcox.test(paired$rabbit_corrected, paired$goat_corrected, paired = TRUE, exact = FALSE), error = function(e) NULL)
+    if (!is.null(tst)) out[[length(out) + 1]] <- tibble(
+      Outcome = outcome_name,
+      Comparison = "Rabbit corrected signal vs goat corrected signal",
+      n_mice = nrow(paired), Estimate = median(delta), p_value = tst$p.value
+    )
+  }
+  bind_rows(out)
+}
+
+statistical_results <- map_dfr(continuous_outcomes, run_corrected_tests) %>%
+  group_by(Comparison) %>%
+  mutate(p_FDR = p.adjust(p_value, method = "BH"), Significance = p_to_stars(p_FDR)) %>%
+  ungroup()
+
+cat("\nPost-averaging control subtraction complete.\n")
+cat("Cell observations retained:", nrow(Analysis), "\n")
+cat("Mice retained:", n_distinct(Analysis$Mouse), "\n")
+cat("\nCorrected-signal statistical results (FDR-adjusted within comparison across outcomes):\n")
+print(statistical_results)
+
+# Descriptive plot of original cell measurements by antibody (not used as the
+# independent sample for the tests).
+plot_original_cells <- function(outcome_name) {
+  ggplot(Analysis %>% filter(!is.na(.data[[outcome_name]])),
+         aes(x = Antibody, y = .data[[outcome_name]], fill = Antibody)) +
+    geom_violin(trim = FALSE, alpha = 0.25, na.rm = TRUE) +
+    geom_point(position = position_jitter(width = 0.10), alpha = 0.20, size = 0.8, na.rm = TRUE) +
+    labs(title = outcome_name, subtitle = "Original cell-level measurements; descriptive only", x = "Group", y = outcome_name) +
+    theme_classic(base_size = 16) + theme(legend.position = "none")
+}
+walk(continuous_outcomes, ~ print(plot_original_cells(.x)))
+
+# Plot corrected, post-averaging signal. Each point represents one mouse.
+plot_corrected_signal <- function(outcome_name) {
+  dat <- corrected_signals %>% filter(Outcome == outcome_name, is.finite(Corrected_signal))
+  ggplot(dat, aes(x = Antibody, y = Corrected_signal, colour = Antibody, fill = Antibody)) +
+    geom_hline(yintercept = 0, linetype = 2, colour = "grey50") +
+    geom_boxplot(width = 0.55, alpha = 0.20, outlier.shape = NA, na.rm = TRUE) +
+    geom_point(position = position_jitter(width = 0.06), size = 2.2, alpha = 0.85, na.rm = TRUE) +
+    stat_summary(fun = median, geom = "point", shape = 18, size = 3.5, colour = "black", na.rm = TRUE) +
+    labs(title = paste(outcome_name, "— control-subtracted signal"),
+         subtitle = "Cell measurements averaged per mouse first; control mean then subtracted",
+         x = NULL, y = paste("Corrected", outcome_name)) +
+    theme_classic(base_size = 16) + theme(legend.position = "none")
+}
+walk(continuous_outcomes, ~ print(plot_corrected_signal(.x)))
+
+# Optional output files (comment/uncomment):
+# write.csv(mouse_means, "antibody_mouse_means_before_subtraction.csv", row.names = FALSE)
+# write.csv(corrected_signals_wide, "antibody_control_subtracted_signals_by_mouse.csv", row.names = FALSE)
+# write.csv(statistical_results, "antibody_corrected_signal_statistics.csv", row.names = FALSE)
