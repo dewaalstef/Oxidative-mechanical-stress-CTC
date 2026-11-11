@@ -1,0 +1,2049 @@
+# ============================================================
+# 1. LOAD PACKAGES
+# ============================================================
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(FSA)
+library(stringr)
+library(purrr)
+
+# ============================================================
+# 2. LOAD DATA
+# ============================================================
+
+# add directory
+excel_directory = [...]
+
+Analysis <- read_excel(
+  excel_directory,
+  sheet = "Data-main"
+)
+
+# view(Analysis)
+
+
+# ============================================================
+# 3. ANALYSIS SETTINGS
+# ============================================================
+
+# ------------------------------------------------------------
+# Model specification
+# ------------------------------------------------------------
+# Examples:
+#
+# Treatment only:
+# model_terms <- c("Treatment")
+#
+# Treatment + Condensed_nucleus:
+# model_terms <- c("Treatment", "Condensed_nucleus")
+#
+# Treatment x Condensed_nucleus:
+# model_terms <- c(
+#   "Treatment", "Condensed_nucleus",
+#   "Treatment:Condensed_nucleus"
+# )
+#
+# Treatment x Timepoint:
+# model_terms <- c(
+#   "Treatment", "Timepoint_hours",
+#   "Treatment:Timepoint_hours"
+# )
+#
+# Treatment x Condensed_nucleus x Timepoint:
+# model_terms <- c(
+#   "Treatment", "Condensed_nucleus", "Timepoint_hours",
+#   "Treatment:Condensed_nucleus",
+#   "Treatment:Timepoint_hours",
+#   "Condensed_nucleus:Timepoint_hours",
+#   "Treatment:Condensed_nucleus:Timepoint_hours"
+# )
+
+model_terms <- c(
+  "Treatment"
+)
+
+# Biological replicate / random effect
+random_effect <- "Mouse"
+
+# ------------------------------------------------------------
+# Pairwise comparison settings
+# ------------------------------------------------------------
+
+# Variable whose levels are compared pairwise
+comparison_variable <- "Treatment"
+
+# Optional variable(s) within which treatment comparisons are made.
+#
+# NULL = one overall treatment comparison.
+#
+# "Condensed_nucleus" =
+# treatment compared separately within no/yes.
+#
+# "Timepoint_hours" =
+# treatment compared separately within each timepoint.
+#
+# c("Condensed_nucleus", "Timepoint_hours") =
+# treatment compared separately within every combination.
+#
+# When this is used, the corresponding interaction(s) should normally
+# be included in model_terms.
+
+comparison_within <- NULL
+
+# ------------------------------------------------------------
+# Plot stratification
+# ------------------------------------------------------------
+
+# NULL = no facets
+# "Condensed_nucleus" = separate panels for no/yes
+# "Timepoint_hours" = separate panels for each timepoint
+# c("Condensed_nucleus", "Timepoint_hours") =
+# one panel per combination
+#
+# For significance bars, plot_stratification should contain all
+# variables listed in comparison_within.
+
+plot_stratification <- NULL
+
+# ------------------------------------------------------------
+# Plot x-axis and grouping (independent of statistical settings)
+# ------------------------------------------------------------
+# Default: timepoint on the x-axis, with treatments side by side.
+# These settings control plotting only; they do not change the model.
+plot_x_variable <- "Timepoint_hours"
+plot_group_variable <- "Treatment"
+
+# ------------------------------------------------------------
+# Optional filters
+# ------------------------------------------------------------
+
+treatments_to_include <- NULL
+timepoints_to_include <- NULL
+condensed_nucleus_to_include <- NULL
+
+# Include antibodies being compared
+# EXample
+# Include both antibodies being compared
+# antibodies_to_include <- c(
+#   "rabbit",
+#   "rabbit_control"
+# )
+
+antibodies_to_include <- NULL
+
+
+# ------------------------------------------------------------
+# Outlier settings
+# ------------------------------------------------------------
+
+exclude_puncta_area_outliers <- FALSE
+puncta_area_outlier_threshold <- 50
+
+# Optional Cell_Area_um2 bounds. NULL disables that bound.
+# Example to exclude cells larger than 200 um^2: cell_area_max <- 200
+cell_area_min <- NULL
+cell_area_max <- 750
+
+# ------------------------------------------------------------
+# Zero puncta intensity handling
+# ------------------------------------------------------------
+
+exclude_zero_puncta_intensity <- FALSE
+
+# ------------------------------------------------------------
+# Minimum number of observations required per mouse
+# ------------------------------------------------------------
+
+min_observations_per_mouse <- 3
+
+mouse_counts <- Analysis %>%
+  count(Mouse, name = "n_observations")
+
+excluded_mice <- mouse_counts %>%
+  filter(n_observations < min_observations_per_mouse)
+
+Analysis <- Analysis %>%
+  filter(!Mouse %in% excluded_mice$Mouse)
+
+cat(
+  "Excluded", nrow(excluded_mice),
+  "mice with fewer than", min_observations_per_mouse,
+  "observations.\n"
+)
+
+# ------------------------------------------------------------
+# Normality decision
+# ------------------------------------------------------------
+
+# TRUE:
+# residual normality determines the branch.
+#
+# Normal residuals:
+# mixed-model ANOVA + Tukey.
+#
+# Non-normal residuals:
+# mouse-level Kruskal-Wallis + Dunn-Holm.
+#
+# FALSE:
+# always use the nonparametric branch.
+
+automatic_normality_decision <- TRUE
+normality_alpha <- 0.05
+
+
+# ============================================================
+# 4. DEFINE FACTORS
+# ============================================================
+
+Analysis$Treatment <- factor(
+  Analysis$Treatment,
+  levels = c("control", "artesunate", "NAC")
+)
+
+Analysis$Timepoint_hours <- factor(
+  Analysis$Timepoint_hours,
+  levels = c(1, 24, 72),
+  labels = c("1 h", "24 h", "72 h")
+)
+
+Analysis$Condensed_nucleus <- factor(
+  Analysis$Condensed_nucleus,
+  levels = c("no", "yes"),
+  labels = c("Normal nucleus", "Condensed nucleus")
+)
+
+Analysis$Antibody <- factor(
+  Analysis$Antibody,
+  levels = c(
+    "rabbit",
+    "rabbit_control",
+    "goat",
+    "goat_control"
+  )
+)
+
+
+
+condition_colours <- c(
+  "control" = "#F9918A",
+  "artesunate" = "#08BC3E",
+  "NAC"        = "#77aaff"
+)
+
+# ============================================================
+# 5. CHECK SETTINGS
+# ============================================================
+
+model_variables <- unique(
+  unlist(
+    strsplit(
+      model_terms,
+      ":",
+      fixed = TRUE
+    )
+  )
+)
+
+required_variables <- unique(
+  c(
+    model_variables,
+    comparison_variable,
+    comparison_within,
+    plot_stratification,
+    plot_x_variable,
+    plot_group_variable,
+    random_effect
+  )
+)
+
+missing_variables <- setdiff(
+  required_variables,
+  names(Analysis)
+)
+
+if (length(missing_variables) > 0) {
+  
+  stop(
+    paste0(
+      "Missing variables in Data-main: ",
+      paste(
+        missing_variables,
+        collapse = ", "
+      )
+    )
+  )
+}
+
+if (
+  !is.null(comparison_within) &&
+  !all(comparison_within %in% plot_stratification)
+) {
+  
+  stop(
+    paste0(
+      "When comparison_within is specified, ",
+      "plot_stratification must contain all comparison_within ",
+      "variables so significance bars can be assigned to the ",
+      "correct panels."
+    )
+  )
+}
+
+if (!is.null(comparison_within)) {
+  
+  missing_interactions <- map_chr(
+    comparison_within,
+    function(v) {
+      
+      target <- paste(
+        sort(
+          c(
+            comparison_variable,
+            v
+          )
+        ),
+        collapse = ":"
+      )
+      
+      present <- map_lgl(
+        model_terms,
+        function(term) {
+          
+          paste(
+            sort(
+              strsplit(
+                term,
+                ":",
+                fixed = TRUE
+              )[[1]]
+            ),
+            collapse = ":"
+          ) == target
+        }
+      )
+      
+      if (any(present)) {
+        ""
+      } else {
+        v
+      }
+    }
+  )
+  
+  missing_interactions <- missing_interactions[
+    missing_interactions != ""
+  ]
+  
+  if (length(missing_interactions) > 0) {
+    
+    warning(
+      paste0(
+        "comparison_within includes ",
+        paste(
+          missing_interactions,
+          collapse = ", "
+        ),
+        " but the corresponding Treatment interaction ",
+        "is not in model_terms. ",
+        "For conditional treatment comparisons, include ",
+        "the interaction explicitly."
+      )
+    )
+  }
+}
+
+if (!comparison_variable %in% model_variables) {
+  
+  warning(
+    paste0(
+      "comparison_variable ('",
+      comparison_variable,
+      "') is not a main model variable. ",
+      "Check model_terms."
+    )
+  )
+}
+
+
+# ============================================================
+# 6. OPTIONAL FILTERS
+# ============================================================
+
+if (!is.null(treatments_to_include)) {
+  
+  Analysis <- Analysis %>%
+    filter(
+      Treatment %in% treatments_to_include
+    )
+}
+
+if (!is.null(timepoints_to_include)) {
+  
+  Analysis <- Analysis %>%
+    filter(
+      Timepoint_hours %in% timepoints_to_include
+    )
+}
+
+if (!is.null(condensed_nucleus_to_include)) {
+  
+  Analysis <- Analysis %>%
+    filter(
+      Condensed_nucleus %in%
+        condensed_nucleus_to_include
+    )
+}
+
+if (!is.null(antibodies_to_include)) {
+  
+  Analysis <- Analysis %>%
+    filter(
+      Antibody %in% antibodies_to_include
+    )
+}
+
+
+# ============================================================
+# 7. OPTIONAL OUTLIER FILTERS
+# ============================================================
+
+if (exclude_puncta_area_outliers) {
+  
+  Analysis <- Analysis %>%
+    filter(
+      is.na(Mean_Puncta_Area_um2) |
+        Mean_Puncta_Area_um2 <=
+        puncta_area_outlier_threshold
+    )
+}
+
+if (!is.null(cell_area_min)) {
+  Analysis <- Analysis %>%
+    filter(is.na(Cell_Area_um2) | Cell_Area_um2 >= cell_area_min)
+}
+
+if (!is.null(cell_area_max)) {
+  Analysis <- Analysis %>%
+    filter(is.na(Cell_Area_um2) | Cell_Area_um2 < cell_area_max)
+}
+
+if (exclude_zero_puncta_intensity) {
+  
+  n_zero <- sum(
+    Analysis$Mean_Puncta_Intensity == 0,
+    na.rm = TRUE
+  )
+  
+  cat(
+    "\nNumber of zero Mean_Puncta_Intensity values converted to NA:",
+    n_zero,
+    "\n"
+  )
+  
+  Analysis$Mean_Puncta_Intensity[
+    Analysis$Mean_Puncta_Intensity == 0
+  ] <- NA
+}
+
+
+# ------------------------------------------------------------
+# Statistical-analysis subset
+# ------------------------------------------------------------
+# Descriptive plots below use all retained timepoints.
+# Statistical tests are restricted to 1 h because replication at
+# 24 h and 72 h is limited. Treatment comparisons are therefore
+# performed only among mice measured at 1 h.
+
+stats_timepoint <- "1 h"
+
+Analysis_stats <- Analysis %>%
+  filter(Timepoint_hours == stats_timepoint) %>%
+  droplevels()
+
+if (nrow(Analysis_stats) == 0) {
+  stop(
+    "No observations found for stats_timepoint = '", stats_timepoint,
+    "'. Check the levels of Analysis$Timepoint_hours."
+  )
+}
+
+cat(
+  "\\nStatistical analyses restricted to timepoint: ",
+  stats_timepoint,
+  " (", nrow(Analysis_stats), " cell-level observations).\\n",
+  sep = ""
+)
+
+# ============================================================
+# 8. CHECK DATA
+# ============================================================
+
+cat(
+  "\nNumber of observations:",
+  nrow(Analysis),
+  "\n"
+)
+
+cat("\nTreatments:\n")
+
+print(
+  table(
+    Analysis$Treatment,
+    useNA = "ifany"
+  )
+)
+
+cat("\nTimepoints:\n")
+
+print(
+  table(
+    Analysis$Timepoint_hours,
+    useNA = "ifany"
+  )
+)
+
+cat("\nCondensed nucleus:\n")
+
+print(
+  table(
+    Analysis$Condensed_nucleus,
+    useNA = "ifany"
+  )
+)
+
+cat("\nNumber of mice:\n")
+
+print(
+  length(
+    unique(
+      Analysis[[random_effect]]
+    )
+  )
+)
+
+cat("\nMice per treatment:\n")
+
+print(
+  Analysis %>%
+    distinct(
+      .data[[random_effect]],
+      Treatment
+    ) %>%
+    count(Treatment)
+)
+
+
+# ============================================================
+# 9. CONTINUOUS OUTCOMES
+# ============================================================
+
+continuous_outcomes <- c(
+  "Cell_Area_um2",
+  "Cell_Mean_Intensity",
+  "Cell_RawIntDen",
+  "Puncta_Count",
+  "Puncta_Density_per_um2",
+  "Total_Puncta_Area_um2",
+  "Mean_Puncta_Area_um2",
+  "Mean_Puncta_Intensity",
+  "Puncta_RawIntDen",
+  "Fraction_Puncta_Area_percent",
+  "Fraction_Puncta_Signal_percent"
+)
+
+
+# ============================================================
+# 10. HELPER FUNCTIONS
+# ============================================================
+
+p_to_stars <- function(p) {
+  
+  case_when(
+    is.na(p) ~ "",
+    p < 0.001 ~ "***",
+    p < 0.01 ~ "**",
+    p < 0.05 ~ "*",
+    TRUE ~ "ns"
+  )
+}
+
+
+make_formula <- function(outcome_name) {
+  
+  fixed_effects <- paste(
+    model_terms,
+    collapse = " + "
+  )
+  
+  as.formula(
+    paste0(
+      outcome_name,
+      " ~ ",
+      fixed_effects,
+      " + (1 | ",
+      random_effect,
+      ")"
+    )
+  )
+}
+
+
+make_emmeans_spec <- function() {
+  
+  if (is.null(comparison_within)) {
+    
+    as.formula(
+      paste0(
+        "~ ",
+        comparison_variable
+      )
+    )
+    
+  } else {
+    
+    as.formula(
+      paste0(
+        "~ ",
+        comparison_variable,
+        " | ",
+        paste(
+          comparison_within,
+          collapse = " * "
+        )
+      )
+    )
+  }
+}
+
+
+make_stratum <- function(data, variables) {
+  
+  if (is.null(variables)) {
+    
+    return(
+      rep(
+        "Overall",
+        nrow(data)
+      )
+    )
+  }
+  
+  do.call(
+    interaction,
+    c(
+      data[variables],
+      list(
+        drop = TRUE,
+        sep = " | "
+      )
+    )
+  ) |>
+    as.character()
+}
+
+safe_dunn_test <- function(data, value_col, group_col) {
+  
+  dunn <- tryCatch(
+    FSA::dunnTest(
+      x = data[[value_col]],
+      g = droplevels(factor(data[[group_col]])),
+      method = "holm"
+    ),
+    error = function(e) {
+      message("Dunn test failed: ", conditionMessage(e))
+      NULL
+    }
+  )
+  
+  if (is.null(dunn) ||
+      is.null(dunn$res) ||
+      !is.data.frame(dunn$res) ||
+      nrow(dunn$res) == 0) {
+    return(tibble(
+      contrast = character(),
+      estimate = numeric(),
+      SE = numeric(),
+      df = numeric(),
+      statistic = numeric(),
+      p.value = numeric(),
+      Outcome = character(),
+      Test = character(),
+      comparison_stratum = character()
+    ))
+  }
+  
+  dunn$res %>%
+    transmute(
+      contrast = Comparison,
+      estimate = NA_real_,
+      SE = NA_real_,
+      df = NA_real_,
+      statistic = Z,
+      p.value = P.adj,
+      Outcome = NA_character_,
+      Test = "Dunn-Holm",
+      comparison_stratum = NA_character_
+    )
+}
+
+# ============================================================
+# 11. STATISTICAL ANALYSIS FUNCTION
+# ============================================================
+
+run_analysis <- function(outcome_name) {
+  
+  cat(
+    "\n--------------------------------------------\n"
+  )
+  
+  cat(
+    "Analysing:",
+    outcome_name,
+    "\n"
+  )
+  
+  model_variables_for_outcome <- unique(
+    c(
+      outcome_name,
+      random_effect,
+      model_variables,
+      comparison_within
+    )
+  )
+  
+  dat <- Analysis_stats %>%
+    select(
+      all_of(
+        model_variables_for_outcome
+      )
+    ) %>%
+    filter(
+      !is.na(
+        .data[[outcome_name]]
+      ),
+      !is.na(
+        .data[[random_effect]]
+      )
+    ) %>%
+    droplevels()
+  
+  formula <- make_formula(
+    outcome_name
+  )
+  
+  model <- lmer(
+    formula,
+    data = dat,
+    REML = TRUE
+  )
+  
+  residuals_model <- resid(model)
+  
+  normality_p <- NA_real_
+  
+  if (
+    length(residuals_model) >= 3 &&
+    length(residuals_model) <= 5000
+  ) {
+    
+    normality_p <- shapiro.test(
+      residuals_model
+    )$p.value
+  }
+  
+  use_parametric <- (
+    automatic_normality_decision &&
+      !is.na(normality_p) &&
+      normality_p > normality_alpha
+  )
+  
+  
+  # ==========================================================
+  # PARAMETRIC BRANCH
+  # ==========================================================
+  
+  if (use_parametric) {
+    
+    cat(
+      "Method: mixed-model ANOVA + Tukey\n"
+    )
+    
+    anova_result <- anova(
+      model,
+      type = 3
+    )
+    
+    overall <- tibble(
+      Outcome = outcome_name,
+      Test = "ANOVA",
+      normality_p = normality_p,
+      Effect = rownames(anova_result),
+      statistic = anova_result[, "F value"],
+      df_num = anova_result[, "NumDF"],
+      df_den = anova_result[, "DenDF"],
+      p_value = anova_result[, "Pr(>F)"]
+    )
+    
+    emm <- emmeans(
+      model,
+      specs = make_emmeans_spec()
+    )
+    
+    pairwise <- as.data.frame(
+      contrast(
+        emm,
+        method = "pairwise",
+        adjust = "tukey"
+      )
+    )
+    
+    if (is.null(comparison_within)) {
+      
+      pairwise$comparison_stratum <- "Overall"
+      
+    } else {
+      
+      pairwise$comparison_stratum <- make_stratum(
+        pairwise,
+        comparison_within
+      )
+    }
+    
+    pairwise$Outcome <- outcome_name
+    pairwise$Test <- "Tukey"
+    
+    return(
+      list(
+        model = model,
+        data = dat,
+        method = "ANOVA",
+        
+        normality = tibble(
+          Outcome = outcome_name,
+          normality_p = normality_p
+        ),
+        
+        overall = overall,
+        
+        emmeans = as.data.frame(
+          emm
+        ),
+        
+        pairwise = pairwise
+      )
+    )
+  }
+  
+  
+  # ==========================================================
+  # NONPARAMETRIC BRANCH
+  # ==========================================================
+  
+  cat(
+    "Method: Kruskal-Wallis + Dunn-Holm\n"
+  )
+  
+  grouping_variables <- unique(
+    c(
+      random_effect,
+      comparison_variable,
+      comparison_within
+    )
+  )
+  
+  mouse_data <- Analysis_stats %>%
+    select(
+      all_of(
+        c(
+          grouping_variables,
+          outcome_name
+        )
+      )
+    ) %>%
+    filter(
+      !is.na(
+        .data[[outcome_name]]
+      ),
+      !is.na(
+        .data[[random_effect]]
+      )
+    ) %>%
+    group_by(
+      across(
+        all_of(
+          grouping_variables
+        )
+      )
+    ) %>%
+    summarise(
+      Value = mean(
+        .data[[outcome_name]],
+        na.rm = TRUE
+      ),
+      .groups = "drop"
+    ) %>%
+    filter(
+      is.finite(Value)
+    )
+  
+  
+  # ==========================================================
+  # OVERALL KRUSKAL-WALLIS + DUNN
+  # ==========================================================
+  
+  if (is.null(comparison_within)) {
+    
+    kw <- kruskal.test(
+      mouse_data$Value ~
+        mouse_data[[comparison_variable]]
+    )
+    
+    overall <- tibble(
+      Outcome = outcome_name,
+      Test = "Kruskal-Wallis",
+      normality_p = normality_p,
+      Effect = comparison_variable,
+      comparison_stratum = "Overall",
+      statistic = unname(
+        kw$statistic
+      ),
+      df_num = unname(
+        kw$parameter
+      ),
+      df_den = NA_real_,
+      p_value = kw$p.value
+    )
+    
+    pairwise <- safe_dunn_test(
+      data = mouse_data,
+      value_col = "Value",
+      group_col = comparison_variable
+    ) %>%
+      mutate(
+        Outcome = outcome_name,
+        comparison_stratum = "Overall"
+      )
+    
+  } else {
+    
+    
+    # ========================================================
+    # STRATIFIED KRUSKAL-WALLIS + DUNN
+    # ========================================================
+    
+    mouse_data$comparison_stratum <- make_stratum(
+      mouse_data,
+      comparison_within
+    )
+    
+    kw_list <- list()
+    dunn_list <- list()
+    
+    for (
+      stratum in
+      unique(
+        mouse_data$comparison_stratum
+      )
+    ) {
+      
+      dat_stratum <- mouse_data %>%
+        filter(
+          comparison_stratum == stratum
+        )
+      
+      if (
+        n_distinct(
+          dat_stratum[[comparison_variable]]
+        ) < 2
+      ) {
+        next
+      }
+      
+      kw <- kruskal.test(
+        dat_stratum$Value ~
+          dat_stratum[[comparison_variable]]
+      )
+      
+      kw_list[[stratum]] <- tibble(
+        Outcome = outcome_name,
+        Test = "Kruskal-Wallis",
+        normality_p = normality_p,
+        Effect = paste(
+          comparison_variable,
+          "within",
+          stratum
+        ),
+        comparison_stratum = stratum,
+        statistic = unname(
+          kw$statistic
+        ),
+        df_num = unname(
+          kw$parameter
+        ),
+        df_den = NA_real_,
+        p_value = kw$p.value
+      )
+      
+      dunn_list[[stratum]] <- safe_dunn_test(
+        data = dat_stratum,
+        value_col = "Value",
+        group_col = comparison_variable
+      ) %>%
+        mutate(
+          Outcome = outcome_name,
+          comparison_stratum = stratum
+        )
+    }
+    
+    overall <- bind_rows(
+      kw_list
+    )
+    
+    pairwise <- bind_rows(
+      dunn_list
+    )
+  }
+  
+  
+  # ==========================================================
+  # RETURN NONPARAMETRIC RESULTS
+  # ==========================================================
+  
+  list(
+    model = model,
+    data = dat,
+    method = "Kruskal-Wallis",
+    
+    normality = tibble(
+      Outcome = outcome_name,
+      normality_p = normality_p
+    ),
+    
+    overall = overall,
+    
+    emmeans = NULL,
+    
+    pairwise = pairwise
+  )
+}
+
+
+# ============================================================
+# 12. RUN ALL ANALYSES
+# ============================================================
+
+analysis_results <- setNames(
+  map(
+    continuous_outcomes,
+    run_analysis
+  ),
+  continuous_outcomes
+)
+
+
+normality_results <- map_dfr(
+  analysis_results,
+  "normality"
+)
+
+
+overall_results <- map_dfr(
+  analysis_results,
+  "overall"
+)
+
+
+model_emmeans_results <- map2_dfr(
+  analysis_results,
+  names(analysis_results),
+  
+  function(
+    x,
+    outcome_name
+  ) {
+    
+    if (is.null(x$emmeans)) {
+      return(tibble())
+    }
+    
+    as_tibble(
+      x$emmeans
+    ) %>%
+      mutate(
+        Outcome = outcome_name
+      )
+  }
+)
+
+
+# ============================================================
+# FIXED DOWNSTREAM PAIRWISE COLLECTION
+# ============================================================
+
+
+model_pairwise_results <- map2_dfr(
+  analysis_results,
+  names(analysis_results),
+  
+  function(
+    x,
+    outcome_name
+  ) {
+    
+    if (is.null(x$pairwise)) {
+      return(tibble())
+    }
+    
+    as_tibble(
+      x$pairwise
+    ) %>%
+      mutate(
+        Outcome = outcome_name,
+        significance = p_to_stars(
+          p.value
+        )
+      )
+  }
+)
+
+
+# ============================================================
+# 13. FDR CORRECTION OF OVERALL RESULTS
+# ============================================================
+
+# BH/FDR is applied separately within each model effect
+# across outcomes.
+#
+# Pairwise Tukey/Dunn p-values are already adjusted and are
+# not subjected to another correction here.
+
+overall_results <- overall_results %>%
+  group_by(
+    Effect
+  ) %>%
+  mutate(
+    p_FDR = p.adjust(
+      p_value,
+      method = "BH"
+    )
+  ) %>%
+  ungroup()
+
+
+# ============================================================
+# 14. PRINT RESULTS
+# ============================================================
+
+cat(
+  "\n\n============================================\n"
+)
+
+cat(
+  "OVERALL STATISTICAL RESULTS\n"
+)
+
+cat(
+  "============================================\n\n"
+)
+
+print(
+  overall_results
+)
+
+
+cat(
+  "\n\n============================================\n"
+)
+
+cat(
+  "NORMALITY RESULTS\n"
+)
+
+cat(
+  "============================================\n\n"
+)
+
+print(
+  normality_results
+)
+
+
+cat(
+  "\n\n============================================\n"
+)
+
+cat(
+  "PAIRWISE RESULTS\n"
+)
+
+cat(
+  "============================================\n\n"
+)
+
+print(
+  model_pairwise_results
+)
+
+
+# ============================================================
+# 15. RESIDUAL DIAGNOSTICS
+# ============================================================
+
+par(
+  mfrow = c(3, 4)
+)
+
+for (
+  outcome in continuous_outcomes
+) {
+  
+  model <- analysis_results[[outcome]]$model
+  
+  plot(
+    fitted(model),
+    resid(model),
+    main = outcome,
+    xlab = "Fitted values",
+    ylab = "Residuals"
+  )
+  
+  abline(
+    h = 0,
+    lty = 2
+  )
+}
+
+par(
+  mfrow = c(1, 1)
+)
+
+
+# ============================================================
+# 16. NORMAL Q-Q PLOTS
+# ============================================================
+
+par(
+  mfrow = c(3, 4)
+)
+
+for (
+  outcome in continuous_outcomes
+) {
+  
+  model <- analysis_results[[outcome]]$model
+  
+  qqnorm(
+    resid(model),
+    main = outcome
+  )
+  
+  qqline(
+    resid(model)
+  )
+}
+
+par(
+  mfrow = c(1, 1)
+)
+
+
+# ============================================================
+# 17. SINGLE-CELL DESCRIPTIVE PLOTS
+# ============================================================
+
+# No statistical tests or significance bars are used here.
+# Individual cells are descriptive observations only.
+
+plot_single_cell <- function(outcome_name) {
+  # Cell-level descriptive plot: violin distributions per timepoint/treatment.
+  dodge_width <- 0.82
+  
+  plot_data <- Analysis %>%
+    filter(!is.na(.data[[outcome_name]]))
+  
+  p <- ggplot(
+    plot_data,
+    aes(
+      x = .data[[plot_x_variable]],
+      y = .data[[outcome_name]],
+      fill = .data[[plot_group_variable]],
+      colour = .data[[plot_group_variable]],
+      group = interaction(
+        .data[[plot_x_variable]],
+        .data[[plot_group_variable]],
+        drop = TRUE
+      )
+    )
+  ) +
+    geom_violin(
+      position = position_dodge(width = dodge_width),
+      width = 0.9,
+      trim = FALSE,
+      alpha = 0.35
+    ) +
+    stat_summary(
+      aes(group = interaction(.data[[plot_x_variable]], .data[[plot_group_variable]], drop = TRUE)),
+      fun = mean,
+      geom = "point",
+      position = position_dodge(width = dodge_width),
+      shape = 18,
+      size = 2.8,
+      colour = "black"
+    ) +
+    geom_point(
+      position = position_jitterdodge(
+        jitter.width = 0.12,
+        jitter.height = 0,
+        dodge.width = dodge_width
+      ),
+      alpha = 0.3,
+      size = 1.1,
+      show.legend = FALSE
+    ) +
+    labs(
+      title = outcome_name,
+      x = plot_x_variable,
+      y = outcome_name,
+      fill = plot_group_variable,
+      colour = plot_group_variable
+    ) +
+    theme_classic(base_size = 16) +
+    scale_fill_manual(
+      values = condition_colours,
+      drop = FALSE
+    ) +
+    scale_colour_manual(
+      values = condition_colours,
+      drop = FALSE
+    ) +
+    theme(
+      axis.text.x = element_text(size = 20),
+      axis.text.y = element_text(size = 20),
+      axis.title.y = element_text(size = 16),
+      strip.text = element_text(size = 16, face = "bold"),
+      legend.position = "right"
+    )
+  
+  if (!is.null(plot_stratification)) {
+    p <- p + facet_wrap(
+      as.formula(paste("~", paste(plot_stratification, collapse = " + ")))
+    )
+  }
+  
+  p
+}
+
+single_cell_plot_list <- map(
+  continuous_outcomes,
+  plot_single_cell
+)
+
+walk(
+  single_cell_plot_list,
+  print
+)
+
+
+# ============================================================
+# 18. MOUSE-LEVEL SUMMARY
+# ============================================================
+# Descriptive mouse means use all retained timepoints; statistical tests
+# use Analysis_stats (1 h only).
+
+mouse_grouping_variables <- unique(
+  c(
+    random_effect,
+    comparison_variable,
+    comparison_within,
+    plot_stratification,
+    plot_x_variable,
+    plot_group_variable
+  )
+)
+
+mouse_means <- Analysis %>%
+  group_by(
+    across(
+      all_of(
+        mouse_grouping_variables
+      )
+    )
+  ) %>%
+  summarise(
+    across(
+      all_of(
+        continuous_outcomes
+      ),
+      ~ mean(
+        .x,
+        na.rm = TRUE
+      )
+    ),
+    .groups = "drop"
+  )
+
+View(
+  mouse_means
+)
+
+
+# ============================================================
+# 19. PREPARE MOUSE-LEVEL PLOT DATA
+# ============================================================
+
+mouse_plot_data <- mouse_means %>%
+  pivot_longer(
+    cols = all_of(
+      continuous_outcomes
+    ),
+    names_to = "Outcome",
+    values_to = "Value"
+  )
+
+
+# ============================================================
+# 20. PREPARE SIGNIFICANCE DATA
+# ============================================================
+
+sig_comparisons <- model_pairwise_results %>%
+  filter(
+    !is.na(p.value),
+    p.value < 0.05
+  ) %>%
+  mutate(
+    significance = p_to_stars(
+      p.value
+    )
+  )
+
+
+comparison_levels <- levels(
+  droplevels(
+    Analysis[[comparison_variable]]
+  )
+)
+
+
+pair_lookup <- combn(
+  comparison_levels,
+  2,
+  simplify = FALSE
+) %>%
+  map_dfr(
+    function(x) {
+      
+      tibble(
+        group1 = x[1],
+        group2 = x[2],
+        
+        contrast = paste(
+          x[1],
+          x[2],
+          sep = " - "
+        ),
+        
+        contrast_reverse = paste(
+          x[2],
+          x[1],
+          sep = " - "
+        )
+      )
+    }
+  )
+
+
+# Match standard Tukey/Dunn contrast strings to group labels.
+
+sig_comparisons <- sig_comparisons %>%
+  left_join(
+    pair_lookup %>%
+      select(
+        group1,
+        group2,
+        contrast
+      ),
+    by = "contrast"
+  )
+
+
+reverse_lookup <- pair_lookup %>%
+  select(
+    group1_reverse = group1,
+    group2_reverse = group2,
+    contrast = contrast_reverse
+  )
+
+
+sig_comparisons <- sig_comparisons %>%
+  left_join(
+    reverse_lookup,
+    by = "contrast",
+    suffix = c(
+      "",
+      ".reverse"
+    )
+  ) %>%
+  mutate(
+    group1 = coalesce(
+      group1,
+      group1_reverse
+    ),
+    
+    group2 = coalesce(
+      group2,
+      group2_reverse
+    )
+  ) %>%
+  select(
+    -group1_reverse,
+    -group2_reverse
+  ) %>%
+  mutate(
+    x1 = match(
+      group1,
+      comparison_levels
+    ),
+    
+    x2 = match(
+      group2,
+      comparison_levels
+    )
+  ) %>%
+  filter(
+    !is.na(x1),
+    !is.na(x2)
+  )
+
+
+# ============================================================
+# 21. MOUSE-LEVEL PLOT FUNCTION
+# ============================================================
+
+plot_mouse_level <- function(outcome_name) {
+  
+  dat <- mouse_plot_data %>%
+    filter(
+      Outcome == outcome_name
+    )
+  
+  method_for_outcome <-
+    analysis_results[[outcome_name]]$method
+  
+  
+  # ----------------------------------------------------------
+  # Get overall p-value
+  # ----------------------------------------------------------
+  
+  overall_dat <- overall_results %>%
+    filter(
+      Outcome == outcome_name
+    )
+  
+  
+  # For a simple Treatment model, use the Treatment row.
+  # For interaction models, use the comparison variable row.
+  #
+  # If comparison_variable is not present as an Effect,
+  # fall back to the first non-residual effect.
+  
+  overall_row <- overall_dat %>%
+    filter(
+      Effect == comparison_variable
+    )
+  
+  if (nrow(overall_row) == 0) {
+    
+    overall_row <- overall_dat %>%
+      filter(
+        !str_detect(
+          Effect,
+          "^Residual"
+        )
+      ) %>%
+      slice(1)
+  }
+  
+  
+  if (nrow(overall_row) > 0) {
+    
+    overall_p <- overall_row$p_value[1]
+    
+  } else {
+    
+    overall_p <- NA_real_
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Format overall p-value
+  # ----------------------------------------------------------
+  
+  format_p <- function(p) {
+    
+    if (is.na(p)) {
+      return("p = NA")
+    }
+    
+    if (p < 0.001) {
+      return("p < 0.001")
+    }
+    
+    paste0(
+      "p = ",
+      format.pval(
+        p,
+        digits = 3,
+        eps = 0.001
+      )
+    )
+  }
+  
+  
+  overall_p_text <- format_p(
+    overall_p
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Method label
+  # ----------------------------------------------------------
+  
+  if (method_for_outcome == "ANOVA") {
+    
+    subtitle_text <- paste0(
+      "ANOVA: ",
+      overall_p_text,
+      " | Tukey pairwise"
+    )
+    
+  } else {
+    
+    subtitle_text <- paste0(
+      "Kruskal-Wallis: ",
+      overall_p_text,
+      " | Dunn-Holm pairwise"
+    )
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Base plot
+  # ----------------------------------------------------------
+  
+  # Mouse-level summaries: box plots show the distribution of
+  # mouse means; overlaid points show individual mice.
+  dodge_width <- 0.78
+  
+  p <- ggplot(
+    dat %>% filter(!is.na(Value)),
+    aes(
+      x = .data[[plot_x_variable]],
+      y = Value,
+      fill = .data[[plot_group_variable]],
+      colour = .data[[plot_group_variable]],
+      group = interaction(
+        .data[[plot_x_variable]],
+        .data[[plot_group_variable]],
+        drop = TRUE
+      )
+    )
+  ) +
+    geom_boxplot(
+      position = position_dodge(width = dodge_width),
+      width = 0.62,
+      outlier.shape = NA,
+      alpha = 0.25
+    ) +
+    geom_point(
+      position = position_jitterdodge(
+        jitter.width = 0.06,
+        jitter.height = 0,
+        dodge.width = dodge_width
+      ),
+      size = 3,
+      alpha = 0.85
+    ) +
+    stat_summary(
+      aes(group = interaction(
+        .data[[plot_x_variable]],
+        .data[[plot_group_variable]],
+        drop = TRUE
+      )),
+      fun = mean,
+      geom = "point",
+      position = position_dodge(width = dodge_width),
+      shape = 18,
+      size = 4,
+      colour = "black"
+    ) +
+    labs(
+      title = outcome_name,
+      subtitle = subtitle_text,
+      x = plot_x_variable,
+      y = outcome_name,
+      fill = plot_group_variable,
+      colour = plot_group_variable
+    ) +
+    theme_classic(base_size = 14) +
+    scale_fill_manual(
+      values = condition_colours,
+      drop = FALSE
+    ) +
+    scale_colour_manual(
+      values = condition_colours,
+      drop = FALSE
+    ) +
+    theme(
+      axis.text.x = element_text(size = 20),
+      axis.text.y = element_text(size = 20),
+      axis.title.y = element_text(size = 14),
+      plot.subtitle = element_text(size = 16),
+      strip.text = element_text(size = 14, face = "bold"),
+      legend.position = "right"
+    )
+  
+  # ----------------------------------------------------------
+  # Add facets if requested
+  # ----------------------------------------------------------
+  
+  if (!is.null(plot_stratification)) {
+    
+    p <- p +
+      facet_wrap(
+        as.formula(
+          paste(
+            "~",
+            paste(
+              plot_stratification,
+              collapse = " + "
+            )
+          )
+        )
+      )
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Pairwise significance data
+  # ----------------------------------------------------------
+  
+  sig_dat <- sig_comparisons %>%
+    filter(
+      Outcome == outcome_name
+    )
+  
+  if (nrow(sig_dat) == 0) {
+    return(p)
+  }
+  
+  # For timepoint-on-x plots with treatments dodged within each
+  # timepoint, show pairwise brackets only at the stats timepoint.
+  if (!identical(plot_x_variable, comparison_variable)) {
+    
+    if (identical(plot_x_variable, "Timepoint_hours") &&
+        identical(plot_group_variable, comparison_variable) &&
+        identical(comparison_variable, "Treatment")) {
+      
+      time_levels <- levels(droplevels(dat[[plot_x_variable]]))
+      treatment_levels <- levels(droplevels(dat[[plot_group_variable]]))
+      
+      if (!(stats_timepoint %in% time_levels) ||
+          length(treatment_levels) < 2) {
+        return(p)
+      }
+      
+      time_index <- match(stats_timepoint, time_levels)
+      n_treatments <- length(treatment_levels)
+      
+      dodge_offset <- function(treatment) {
+        (match(treatment, treatment_levels) -
+           (n_treatments + 1) / 2) * dodge_width / n_treatments
+      }
+      
+      sig_dat <- sig_dat %>%
+        filter(
+          group1 %in% treatment_levels,
+          group2 %in% treatment_levels
+        ) %>%
+        mutate(
+          x1 = time_index + vapply(group1, dodge_offset, numeric(1)),
+          x2 = time_index + vapply(group2, dodge_offset, numeric(1))
+        )
+      
+      if (nrow(sig_dat) == 0) {
+        return(p)
+      }
+      
+      y_vals <- dat$Value[!is.na(dat$Value)]
+      if (length(y_vals) == 0) {
+        return(p)
+      }
+      y_max <- max(y_vals)
+      y_min <- min(y_vals)
+      y_range <- y_max - y_min
+      if (!is.finite(y_range) || y_range == 0) {
+        y_range <- abs(y_max) * 0.1 + 1
+      }
+      
+      sig_dat <- sig_dat %>%
+        arrange(x1, x2) %>%
+        mutate(
+          y_range = y_range,
+          y_position = y_max + y_range * (0.08 + 0.10 * (row_number() - 1))
+        )
+      
+      return(
+        p +
+          geom_segment(
+            data = sig_dat,
+            aes(x = x1, xend = x2, y = y_position, yend = y_position),
+            inherit.aes = FALSE,
+            colour = "black"
+          ) +
+          geom_segment(
+            data = sig_dat,
+            aes(x = x1, xend = x1, y = y_position,
+                yend = y_position - 0.025 * y_range),
+            inherit.aes = FALSE,
+            colour = "black"
+          ) +
+          geom_segment(
+            data = sig_dat,
+            aes(x = x2, xend = x2, y = y_position,
+                yend = y_position - 0.025 * y_range),
+            inherit.aes = FALSE,
+            colour = "black"
+          ) +
+          geom_text(
+            data = sig_dat,
+            aes(x = (x1 + x2) / 2,
+                y = y_position + 0.025 * y_range,
+                label = significance),
+            inherit.aes = FALSE,
+            colour = "black",
+            size = 5
+          )
+      )
+    }
+    
+    return(p)
+  }
+  
+  # ----------------------------------------------------------
+  # Determine plot strata
+  # ----------------------------------------------------------
+  
+  if (!is.null(comparison_within)) {
+    
+    dat$plot_stratum <- make_stratum(
+      dat,
+      plot_stratification
+    )
+    
+    sig_dat$plot_stratum <-
+      sig_dat$comparison_stratum
+    
+  } else if (!is.null(plot_stratification)) {
+    
+    dat$plot_stratum <- make_stratum(
+      dat,
+      plot_stratification
+    )
+    
+    # Overall comparison cannot safely be repeated in every facet.
+    return(p)
+    
+  } else {
+    
+    dat$plot_stratum <- "Overall"
+    
+    sig_dat$plot_stratum <- "Overall"
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Calculate y-axis positions
+  # ----------------------------------------------------------
+  
+  y_ranges <- dat %>%
+    group_by(
+      plot_stratum
+    ) %>%
+    summarise(
+      y_max = max(
+        Value,
+        na.rm = TRUE
+      ),
+      
+      y_min = min(
+        Value,
+        na.rm = TRUE
+      ),
+      
+      .groups = "drop"
+    ) %>%
+    mutate(
+      y_range = y_max - y_min,
+      
+      y_range = ifelse(
+        y_range == 0 |
+          is.na(y_range),
+        
+        abs(y_max) * 0.1 + 1,
+        
+        y_range
+      )
+    )
+  
+  
+  sig_dat <- sig_dat %>%
+    left_join(
+      y_ranges,
+      by = "plot_stratum"
+    ) %>%
+    group_by(
+      plot_stratum
+    ) %>%
+    arrange(
+      x1,
+      x2,
+      .by_group = TRUE
+    ) %>%
+    mutate(
+      y_position =
+        y_max +
+        y_range * (
+          0.08 +
+            0.10 *
+            (row_number() - 1)
+        )
+    ) %>%
+    ungroup()
+  
+  
+  # ----------------------------------------------------------
+  # Add significance bars
+  # ----------------------------------------------------------
+  
+  p +
+    
+    geom_segment(
+      data = sig_dat,
+      
+      aes(
+        x = x1,
+        xend = x2,
+        y = y_position,
+        yend = y_position
+      ),
+      
+      inherit.aes = FALSE,
+      colour = "black"
+    ) +
+    
+    geom_segment(
+      data = sig_dat,
+      
+      aes(
+        x = x1,
+        xend = x1,
+        y = y_position,
+        yend =
+          y_position -
+          0.025 * y_range
+      ),
+      
+      inherit.aes = FALSE,
+      colour = "black"
+    ) +
+    
+    geom_segment(
+      data = sig_dat,
+      
+      aes(
+        x = x2,
+        xend = x2,
+        y = y_position,
+        yend =
+          y_position -
+          0.025 * y_range
+      ),
+      
+      inherit.aes = FALSE,
+      colour = "black"
+    ) +
+    
+    geom_text(
+      data = sig_dat,
+      
+      aes(
+        x = (x1 + x2) / 2,
+        
+        y =
+          y_position +
+          0.025 * y_range,
+        
+        label = significance
+      ),
+      
+      inherit.aes = FALSE,
+      colour = "black",
+      size = 5
+    )
+}
+
+
+# ============================================================
+# 22. PLOT ALL OUTCOMES
+# ============================================================
+
+mouse_plot_list <- map(
+  continuous_outcomes,
+  plot_mouse_level
+)
+
+walk(
+  mouse_plot_list,
+  print
+)
+
+
+# ============================================================
+# 23. OPTIONAL: SAVE RESULTS
+# ============================================================
+
+# write.csv(
+#   overall_results,
+#   "ex_vivo_overall_results.csv",
+#   row.names = FALSE
+# )
+
+# write.csv(
+#   normality_results,
+#   "ex_vivo_normality_results.csv",
+#   row.names = FALSE
+# )
+
+# write.csv(
+#   model_emmeans_results,
+#   "ex_vivo_emmeans_results.csv",
+#   row.names = FALSE
+# )
+
+# write.csv(
+#   model_pairwise_results,
+#   "ex_vivo_pairwise_results.csv",
+#   row.names = FALSE
+# )
+
+# write.csv(
+#   mouse_means,
+#   "ex_vivo_mouse_means.csv",
+#   row.names = FALSE
+# )
