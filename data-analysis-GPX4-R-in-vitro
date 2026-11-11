@@ -1,0 +1,1837 @@
+# ============================================================
+# GPX4 / Puncta analysis
+#
+#
+# Statistical workflow:
+#   1. Calculate one mean per Treatment x Replicate
+#   2. Fit lm(Value ~ Treatment)
+#   3. Test normality of model residuals
+#   4. If residuals are approximately normal:
+#        -> one-way ANOVA
+#        -> Tukey-adjusted pairwise comparisons
+#   5. If residuals are non-normal:
+#        -> Kruskal-Wallis
+#        -> Dunn test with Holm adjustment
+#
+# Statistical tests are performed on the raw replicate means.
+# Plots are normalized to RPMI-control within each replicate.
+# ============================================================
+
+
+# ============================================================
+# 1. PACKAGES
+# ============================================================
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(purrr)
+library(tibble)
+library(emmeans)
+library(FSA)
+
+
+# ============================================================
+# 2. INPUT
+# ============================================================
+
+# add directory
+excel_directory = [...]
+
+
+Data_analysis_GPX4 <- read_excel(
+  excel_directory,
+  sheet = "Puncta-data"
+)
+
+# Optional:
+# View(Data_analysis_GPX4)
+
+
+# ============================================================
+# 3. SETTINGS
+# ============================================================
+
+# TRUE  = display significant pairwise comparisons
+# FALSE = do not display significance brackets
+
+show_significance <- TRUE
+
+
+# ------------------------------------------------------------
+# Treatments to exclude
+# ------------------------------------------------------------
+
+excluded_treatments <- c(
+  "Secondary-only-control-artesunate+H2O2"
+)
+
+
+# ------------------------------------------------------------
+# Treatment order
+# ------------------------------------------------------------
+
+treatment_order <- c(
+  "RPMI-control",
+  "Artesunate-10µM",
+  "Artesunate-10µM+H2O2-250µM",
+  "Ferrostatin-1-10µM",
+  "Ferrostatin-1-10µM+artesunate-10µM",
+  "NAC-1mM",
+  "RSL3-10µM"
+)
+
+
+# ------------------------------------------------------------
+# Treatment colours
+# ------------------------------------------------------------
+#
+# RPMI-control is the reference/control condition.
+# The remaining colours distinguish the different treatment
+# conditions.
+#
+# ------------------------------------------------------------
+
+treatment_colours <- c(
+  "RPMI-control" =
+    "#F9918A",
+  
+  "Artesunate-10µM" =
+    "#08BC3E",
+  
+  "Artesunate-10µM+H2O2-250µM" =
+    "#989C3F",
+  
+  "Ferrostatin-1-10µM" =
+    "#393E93",
+  
+  "Ferrostatin-1-10µM+artesunate-10µM" =
+    "#56B4E9",
+  
+  "NAC-1mM" =
+    "#E69F00",
+  
+  "RSL3-10µM" =
+    "#666666"
+)
+
+
+# ------------------------------------------------------------
+# Outcomes
+# ------------------------------------------------------------
+
+outcomes <- c(
+  "Cell_Area_um2",
+  "Cell_Mean_Intensity",
+  "Cell_RawIntDen",
+  "Puncta_Count",
+  "Puncta_Density_per_um2",
+  "Total_Puncta_Area_um2",
+  "Mean_Puncta_Area_um2",
+  "Mean_Puncta_Intensity",
+  "Puncta_RawIntDen",
+  "Fraction_Puncta_Area_percent",
+  "Fraction_Puncta_Signal_percent"
+)
+
+
+# ============================================================
+# 4. CLEAN DATA
+# ============================================================
+
+Data_analysis_GPX4 <- Data_analysis_GPX4 %>%
+  filter(
+    !is.na(Treatment),
+    !Treatment %in% excluded_treatments
+  )
+
+Data_analysis_GPX4 <- Data_analysis_GPX4 %>%
+  filter(Cell_Area_um2<2000)
+
+Data_analysis_GPX4$Treatment <- factor(
+  Data_analysis_GPX4$Treatment,
+  levels = treatment_order
+)
+
+
+# Remove unused treatment levels
+Data_analysis_GPX4 <- droplevels(Data_analysis_GPX4)
+
+
+# ============================================================
+# 5. CHECK REPLICATES
+# ============================================================
+
+replicate_check <- Data_analysis_GPX4 %>%
+  group_by(Treatment, Replicate) %>%
+  summarise(
+    n = n(),
+    .groups = "drop"
+  )
+
+print(replicate_check)
+
+
+# ------------------------------------------------------------
+# Number of experimental replicates per treatment
+# ------------------------------------------------------------
+
+replicate_numbers <- Data_analysis_GPX4 %>%
+  distinct(Treatment, Replicate) %>%
+  count(Treatment, name = "n_replicates")
+
+print(replicate_numbers)
+
+
+# ============================================================
+# 6. CALCULATE REPLICATE-LEVEL MEANS
+# ============================================================
+
+replicate_means <- Data_analysis_GPX4 %>%
+  group_by(Treatment, Replicate) %>%
+  summarise(
+    across(
+      all_of(outcomes),
+      ~ mean(.x, na.rm = TRUE)
+    ),
+    .groups = "drop"
+  )
+
+# ============================================================
+# 7. LONG-FORMAT DATA FOR ANALYSIS
+# ============================================================
+
+plot_data <- replicate_means %>%
+  pivot_longer(
+    cols = all_of(outcomes),
+    names_to = "Outcome",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    Treatment = factor(
+      Treatment,
+      levels = treatment_order
+    )
+  )
+
+# ============================================================
+# 8. NORMALISE TO THE RPMI CONTROL WITHIN EACH REPLICATE
+# ============================================================
+
+# Check that each replicate has exactly one RPMI-control row
+control_check <- replicate_means %>%
+  filter(Treatment == "RPMI-control") %>%
+  count(Replicate, name = "n_controls")
+
+if (
+  nrow(control_check) == 0 ||
+  any(control_check$n_controls != 1)
+) {
+  stop(
+    "Each Replicate must have exactly one RPMI-control mean. ",
+    "Check the Replicate labels and control data."
+  )
+}
+
+# Check that every replicate containing treatment data
+# also has a matching RPMI control
+missing_controls <- replicate_means %>%
+  distinct(Replicate) %>%
+  anti_join(
+    control_check %>% select(Replicate),
+    by = "Replicate"
+  )
+
+if (nrow(missing_controls) > 0) {
+  stop(
+    "Some replicates have no matching RPMI-control. ",
+    "Check the Replicate labels."
+  )
+}
+
+# Extract the RPMI-control mean for each replicate
+rpmi_controls <- replicate_means %>%
+  filter(Treatment == "RPMI-control") %>%
+  select(
+    Replicate,
+    all_of(outcomes)
+  ) %>%
+  rename_with(
+    ~ paste0(.x, "_control"),
+    all_of(outcomes)
+  )
+
+# Match each treatment to its own replicate's control
+replicate_means_normalised <- replicate_means %>%
+  left_join(
+    rpmi_controls,
+    by = "Replicate",
+    relationship = "many-to-one"
+  )
+
+# Normalise each outcome to the matched control
+for (outcome in outcomes) {
+  
+  control_column <- paste0(outcome, "_control")
+  
+  numerator <- replicate_means_normalised[[outcome]]
+  denominator <- replicate_means_normalised[[control_column]]
+  
+  replicate_means_normalised[[outcome]] <- ifelse(
+    is.na(denominator) | denominator == 0,
+    NA_real_,
+    numerator / denominator * 100
+  )
+}
+
+# Keep plotting columns only
+replicate_means_normalised <- replicate_means_normalised %>%
+  select(
+    Treatment,
+    Replicate,
+    all_of(outcomes)
+  )
+
+# Long-format plotting data
+plot_data_normalised <- replicate_means_normalised %>%
+  pivot_longer(
+    cols = all_of(outcomes),
+    names_to = "Outcome",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    Treatment = factor(
+      Treatment,
+      levels = treatment_order
+    )
+  )
+
+# Inspect the matched values
+print(
+  replicate_means_normalised %>%
+    select(Treatment, Replicate, all_of(outcomes))
+)
+
+
+# ============================================================
+# 9. STATISTICAL ANALYSIS FUNCTION
+# ============================================================
+#
+# Automatically chooses:
+#
+#   approximately normal residuals
+#       -> ANOVA + Tukey
+#
+#   non-normal residuals
+#       -> Kruskal-Wallis + Dunn-Holm
+#
+# Normality is tested on MODEL RESIDUALS, not separately within
+# each treatment. This is appropriate here because there are
+# only a small number of experimental replicates per treatment.
+# ============================================================
+
+run_model <- function(
+    outcome_name,
+    data = replicate_means
+) {
+  
+  # ----------------------------------------------------------
+  # Prepare data
+  # ----------------------------------------------------------
+  
+  dat <- data %>%
+    select(
+      Treatment,
+      all_of(outcome_name)
+    ) %>%
+    rename(
+      Value = all_of(outcome_name)
+    ) %>%
+    filter(
+      !is.na(Value)
+    ) %>%
+    mutate(
+      Treatment = droplevels(Treatment)
+    )
+  
+  
+  # ----------------------------------------------------------
+  # Basic checks
+  # ----------------------------------------------------------
+  
+  if (nrow(dat) < 3) {
+    
+    stop(
+      paste0(
+        "Not enough observations for outcome: ",
+        outcome_name
+      )
+    )
+    
+  }
+  
+  
+  if (nlevels(dat$Treatment) < 2) {
+    
+    stop(
+      paste0(
+        "Fewer than two treatment groups available for outcome: ",
+        outcome_name
+      )
+    )
+    
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Linear model
+  # ----------------------------------------------------------
+  
+  model <- lm(
+    Value ~ Treatment,
+    data = dat
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Normality of residuals
+  # ----------------------------------------------------------
+  
+  residuals_model <- residuals(model)
+  
+  
+  # Check whether residuals contain variation
+  
+  if (
+    length(residuals_model) >= 3 &&
+    length(residuals_model) <= 5000 &&
+    length(unique(residuals_model)) > 1
+  ) {
+    
+    shapiro_result <- shapiro.test(
+      residuals_model
+    )
+    
+    normality_p <- shapiro_result$p.value
+    
+  } else {
+    
+    normality_p <- NA_real_
+    
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Check whether the outcome contains any variation
+  # ----------------------------------------------------------
+  
+  if (
+    length(unique(dat$Value)) <= 1
+  ) {
+    
+    warning(
+      paste0(
+        "Outcome has no variation across replicate means: ",
+        outcome_name,
+        ". Statistical testing is not possible."
+      )
+    )
+    
+    treatment_result <- tibble(
+      Outcome = outcome_name,
+      test_method = "No variation",
+      normality_p = normality_p,
+      statistic = NA_real_,
+      df = NA_real_,
+      p_value = NA_real_
+    )
+    
+    return(
+      list(
+        model = model,
+        
+        treatment_result = treatment_result,
+        
+        pairwise = tibble(),
+        
+        emmeans = NULL,
+        
+        normality = tibble(
+          Outcome = outcome_name,
+          normality_test =
+            "Shapiro-Wilk on model residuals",
+          normality_p = normality_p,
+          distribution = "No residual variation"
+        )
+      )
+    )
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Select statistical approach
+  # ----------------------------------------------------------
+  
+  use_anova <- (
+    !is.na(normality_p) &&
+      normality_p > 0.05
+  )
+  
+  
+  # ==========================================================
+  # ANOVA + Tukey
+  # ==========================================================
+  
+  if (use_anova) {
+    
+    anova_table <- anova(model)
+    
+    overall_p <- anova_table$`Pr(>F)`[1]
+    
+    statistic <- anova_table$`F value`[1]
+    
+    df_value <- anova_table$Df[1]
+    
+    
+    treatment_result <- tibble(
+      Outcome = outcome_name,
+      test_method = "ANOVA",
+      normality_p = normality_p,
+      statistic = statistic,
+      df = df_value,
+      p_value = overall_p
+    )
+    
+    
+    # --------------------------------------------------------
+    # Estimated marginal means
+    # --------------------------------------------------------
+    
+    emm <- emmeans(
+      model,
+      ~ Treatment
+    )
+    
+    
+    # --------------------------------------------------------
+    # Tukey-adjusted pairwise comparisons
+    # --------------------------------------------------------
+    
+    pairwise_raw <- contrast(
+      emm,
+      method = "pairwise",
+      adjust = "tukey"
+    ) %>%
+      as.data.frame()
+    
+    
+    pairwise <- pairwise_raw %>%
+      mutate(
+        Outcome = outcome_name,
+        test_method = "Tukey"
+      )
+    
+    
+    # --------------------------------------------------------
+    # Exact pair lookup
+    #
+    # This avoids problems caused by treatment names
+    # containing hyphens, %, µM, etc.
+    # --------------------------------------------------------
+    
+    pair_lookup <- tibble(
+      group1 = levels(dat$Treatment)
+    ) %>%
+      tidyr::crossing(
+        group2 = levels(dat$Treatment)
+      ) %>%
+      filter(
+        match(
+          group1,
+          levels(dat$Treatment)
+        ) <
+          match(
+            group2,
+            levels(dat$Treatment)
+          )
+      ) %>%
+      mutate(
+        contrast = paste(
+          group1,
+          group2,
+          sep = " - "
+        )
+      )
+    
+    
+    pairwise <- pairwise %>%
+      left_join(
+        pair_lookup,
+        by = "contrast"
+      )
+    
+    
+    return(
+      list(
+        model = model,
+        
+        treatment_result = treatment_result,
+        
+        pairwise = pairwise,
+        
+        emmeans = as.data.frame(emm),
+        
+        normality = tibble(
+          Outcome = outcome_name,
+          normality_test =
+            "Shapiro-Wilk on model residuals",
+          normality_p = normality_p,
+          distribution =
+            "Approximately normal"
+        )
+      )
+    )
+  }
+  
+  
+  # ==========================================================
+  # Kruskal-Wallis + Dunn-Holm
+  # ==========================================================
+  
+  kw_result <- kruskal.test(
+    Value ~ Treatment,
+    data = dat
+  )
+  
+  
+  treatment_result <- tibble(
+    Outcome = outcome_name,
+    test_method = "Kruskal-Wallis",
+    normality_p = normality_p,
+    statistic = unname(
+      kw_result$statistic
+    ),
+    df = unname(
+      kw_result$parameter
+    ),
+    p_value = kw_result$p.value
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Dunn test
+  # ----------------------------------------------------------
+  
+  dunn_raw <- FSA::dunnTest(
+    Value ~ Treatment,
+    data = dat,
+    method = "holm"
+  )$res
+  
+  
+  # ----------------------------------------------------------
+  # Create exact pair lookup
+  # ----------------------------------------------------------
+  
+  pair_lookup <- tibble(
+    group1 = levels(dat$Treatment)
+  ) %>%
+    tidyr::crossing(
+      group2 = levels(dat$Treatment)
+    ) %>%
+    filter(
+      match(
+        group1,
+        levels(dat$Treatment)
+      ) <
+        match(
+          group2,
+          levels(dat$Treatment)
+        )
+    ) %>%
+    mutate(
+      Comparison = paste(
+        group1,
+        group2,
+        sep = " - "
+      )
+    )
+  
+  
+  # ----------------------------------------------------------
+  # Standardise Dunn output
+  #
+  # IMPORTANT:
+  # FSA::dunnTest() stores the Holm-adjusted p-value in P.adj.
+  # We rename it to p.value so downstream plotting works
+  # identically for Tukey and Dunn results.
+  # ----------------------------------------------------------
+  
+  pairwise <- dunn_raw %>%
+    left_join(
+      pair_lookup,
+      by = "Comparison"
+    ) %>%
+    mutate(
+      Outcome = outcome_name,
+      test_method = "Dunn-Holm",
+      p.value = P.adj
+    )
+  
+  
+  return(
+    list(
+      model = model,
+      
+      treatment_result = treatment_result,
+      
+      pairwise = pairwise,
+      
+      emmeans = NULL,
+      
+      normality = tibble(
+        Outcome = outcome_name,
+        normality_test =
+          "Shapiro-Wilk on model residuals",
+        normality_p = normality_p,
+        distribution = "Non-normal"
+      )
+    )
+  )
+}
+
+
+# ============================================================
+# 10. RUN ANALYSIS FOR ALL OUTCOMES
+# ============================================================
+
+model_results <- map(
+  outcomes,
+  ~ run_model(
+    outcome_name = .x,
+    data = replicate_means
+  )
+)
+
+
+# ------------------------------------------------------------
+# Overall statistical results
+# ------------------------------------------------------------
+
+overall_results <- map_dfr(
+  model_results,
+  "treatment_result"
+)
+
+
+# ------------------------------------------------------------
+# Normality results
+# ------------------------------------------------------------
+
+normality_results <- map_dfr(
+  model_results,
+  "normality"
+)
+
+
+# ------------------------------------------------------------
+# Pairwise results
+# ------------------------------------------------------------
+
+pairwise_results <- map_dfr(
+  model_results,
+  "pairwise"
+)
+
+
+# ------------------------------------------------------------
+# Estimated means
+#
+# Only ANOVA models have emmeans.
+# ------------------------------------------------------------
+
+estimated_means <- map_dfr(
+  model_results,
+  ~ {
+    if (is.null(.x$emmeans)) {
+      
+      tibble()
+      
+    } else {
+      
+      as_tibble(.x$emmeans)
+      
+    }
+  }
+)
+
+
+# ------------------------------------------------------------
+# Print statistical summary
+# ------------------------------------------------------------
+
+print(overall_results)
+
+print(normality_results)
+
+
+# ============================================================
+# 11. SIGNIFICANCE STAR FUNCTION
+# ============================================================
+
+p_to_stars <- function(p) {
+  
+  case_when(
+    is.na(p) ~ "",
+    p < 0.0001 ~ "****",
+    p < 0.001  ~ "***",
+    p < 0.01   ~ "**",
+    p < 0.05   ~ "*",
+    TRUE       ~ "ns"
+  )
+  
+}
+
+
+# ============================================================
+# 12. PREPARE SIGNIFICANT PAIRWISE COMPARISONS
+# ============================================================
+#
+# Tukey p-values are Tukey-adjusted.
+# Dunn p-values are Holm-adjusted.
+#
+# Only significant comparisons are displayed on plots.
+#
+# IMPORTANT:
+# This filter is based on the PAIRWISE p-value.
+# It does not require the overall ANOVA/Kruskal-Wallis
+# p-value to be < 0.05.
+# ============================================================
+
+if (show_significance) {
+  
+  sig_comparisons <- pairwise_results %>%
+    filter(
+      !is.na(p.value),
+      p.value < 0.05,
+      !is.na(group1),
+      !is.na(group2)
+    ) %>%
+    mutate(
+      significance = p_to_stars(p.value),
+      
+      x1 = match(
+        group1,
+        treatment_order
+      ),
+      
+      x2 = match(
+        group2,
+        treatment_order
+      )
+    ) %>%
+    filter(
+      !is.na(x1),
+      !is.na(x2),
+      x1 != x2
+    ) %>%
+    mutate(
+      x_left = pmin(
+        x1,
+        x2
+      ),
+      
+      x_right = pmax(
+        x1,
+        x2
+      )
+    ) %>%
+    arrange(
+      Outcome,
+      x_left,
+      x_right
+    )
+  
+} else {
+  
+  sig_comparisons <- tibble()
+  
+}
+
+
+# ============================================================
+# 12. PREPARE SIGNIFICANT PAIRWISE COMPARISONS
+# ============================================================
+
+if (show_significance) {
+  
+  # Create lookup for all ordered treatment pairs
+  pair_lookup <- tidyr::expand_grid(
+    group1 = treatment_order,
+    group2 = treatment_order
+  ) %>%
+    filter(group1 != group2) %>%
+    mutate(
+      comparison_text = paste(group1, group2, sep = " - ")
+    )
+  
+  # Standardise pairwise comparison names
+  sig_comparisons <- pairwise_results %>%
+    mutate(
+      comparison_text = if ("contrast" %in% names(.)) {
+        as.character(contrast)
+      } else {
+        as.character(Comparison)
+      }
+    ) %>%
+    filter(
+      !is.na(p.value),
+      p.value < 0.05
+    ) %>%
+    left_join(
+      pair_lookup,
+      by = "comparison_text",
+      suffix = c("", "_lookup")
+    ) %>%
+    mutate(
+      group1 = coalesce(
+        as.character(group1),
+        as.character(group1_lookup)
+      ),
+      group2 = coalesce(
+        as.character(group2),
+        as.character(group2_lookup)
+      ),
+      significance = p_to_stars(p.value),
+      x1 = match(group1, treatment_order),
+      x2 = match(group2, treatment_order),
+      x_left = pmin(x1, x2),
+      x_right = pmax(x1, x2)
+    ) %>%
+    filter(
+      !is.na(x_left),
+      !is.na(x_right),
+      x_left != x_right
+    ) %>%
+    arrange(Outcome, x_left, x_right)
+  
+} else {
+  
+  sig_comparisons <- tibble()
+  
+}
+
+# ============================================================
+# 13. PLOT FUNCTION
+# ============================================================
+#
+# Plot:
+#   - mean across experimental replicates
+#   - SD across experimental replicates
+#   - individual replicate means
+#   - treatment colours
+#   - significant Tukey or Dunn-Holm brackets
+#
+# Data displayed are normalised to RPMI-control.
+# ============================================================
+
+plot_outcome <- function(outcome_name) {
+  
+  # ----------------------------------------------------------
+  # Data for this outcome
+  # ----------------------------------------------------------
+  
+  dat <- plot_data_normalised %>%
+    filter(
+      Outcome == outcome_name
+    )
+  
+  if (nrow(dat) == 0) {
+    stop(
+      paste0(
+        "No data found for outcome: ",
+        outcome_name
+      )
+    )
+  }
+  
+  # ----------------------------------------------------------
+  # Summary statistics
+  # ----------------------------------------------------------
+  
+  summary_dat <- dat %>%
+    group_by(Treatment) %>%
+    summarise(
+      mean_value = mean(
+        Value,
+        na.rm = TRUE
+      ),
+      
+      sd_value = sd(
+        Value,
+        na.rm = TRUE
+      ),
+      
+      n = sum(
+        !is.na(Value)
+      ),
+      
+      .groups = "drop"
+    )
+  
+  # ----------------------------------------------------------
+  # Remove completely missing treatment groups
+  # ----------------------------------------------------------
+  
+  summary_dat <- summary_dat %>%
+    filter(
+      !is.na(mean_value)
+    )
+  
+  # ----------------------------------------------------------
+  # Statistical result for this outcome
+  # ----------------------------------------------------------
+  
+  overall <- overall_results %>%
+    filter(
+      Outcome == outcome_name
+    )
+  
+  if (nrow(overall) != 1) {
+    stop(
+      paste0(
+        "Could not find exactly one statistical result for: ",
+        outcome_name
+      )
+    )
+  }
+  
+  test_method <- overall$test_method[1]
+  overall_p <- overall$p_value[1]
+  
+  # ----------------------------------------------------------
+  # Overall statistical annotation
+  # ----------------------------------------------------------
+  
+  if (test_method == "ANOVA") {
+    
+    overall_label <- paste0(
+      "ANOVA: p = ",
+      format.pval(
+        overall_p,
+        digits = 3,
+        eps = 0.001
+      )
+    )
+    
+  } else {
+    
+    overall_label <- paste0(
+      "Kruskal-Wallis: p = ",
+      format.pval(
+        overall_p,
+        digits = 3,
+        eps = 0.001
+      )
+    )
+    
+  }
+  
+  # ----------------------------------------------------------
+  # Significant pairwise comparisons
+  # ----------------------------------------------------------
+  
+  sig_dat <- sig_comparisons %>%
+    filter(
+      Outcome == outcome_name
+    )
+  
+  # ----------------------------------------------------------
+  # Calculate y positions
+  # ----------------------------------------------------------
+  
+  finite_values <- dat$Value[
+    is.finite(dat$Value)
+  ]
+  
+  if (length(finite_values) == 0) {
+    stop(
+      paste0(
+        "No finite values available for outcome: ",
+        outcome_name
+      )
+    )
+  }
+  
+  y_min <- min(
+    finite_values,
+    na.rm = TRUE
+  )
+  
+  y_max <- max(
+    finite_values,
+    na.rm = TRUE
+  )
+  
+  y_range <- y_max - y_min
+  
+  if (
+    !is.finite(y_range) ||
+    y_range == 0
+  ) {
+    y_range <- max(
+      abs(y_max),
+      1,
+      na.rm = TRUE
+    )
+  }
+  
+  # ----------------------------------------------------------
+  # Overall-test label position
+  # ----------------------------------------------------------
+  
+  overall_y <- y_max +
+    0.08 * y_range
+  
+  # ----------------------------------------------------------
+  # Significance bracket positions
+  # ----------------------------------------------------------
+  
+  if (nrow(sig_dat) > 0) {
+    
+    sig_dat <- sig_dat %>%
+      mutate(
+        y_position =
+          y_max +
+          (row_number() + 1) *
+          0.12 *
+          y_range
+      )
+    
+  }
+  
+  # ----------------------------------------------------------
+  # Plot
+  # ----------------------------------------------------------
+  
+  p <- ggplot(
+    summary_dat,
+    aes(
+      x = Treatment,
+      y = mean_value
+    )
+  ) +
+    
+    # Mean bars: same treatment colours as the individual dots
+    geom_col(
+      aes(fill = Treatment),
+      width = 0.7,
+      colour = "black",
+      alpha = 0.8
+    ) +
+    
+    # SD error bars
+    geom_errorbar(
+      aes(
+        ymin = mean_value - sd_value,
+        ymax = mean_value + sd_value
+      ),
+      width = 0.2,
+      na.rm = TRUE
+    ) +
+    
+    # Individual replicate means with treatment-coloured fill
+    # and a black outline
+    geom_point(
+      data = dat,
+      aes(
+        x = Treatment,
+        y = Value,
+        fill = Treatment
+      ),
+      shape = 21,
+      colour = "black",
+      position = position_jitter(
+        width = 0.08,
+        height = 0
+      ),
+      size = 3,
+      na.rm = TRUE
+    ) +
+    
+    # Same treatment colours for bars and dots
+    scale_fill_manual(
+      values = treatment_colours,
+      drop = FALSE
+    ) +
+    
+    # Labels
+    labs(
+      title = outcome_name,
+      # subtitle = overall_label,
+      x = NULL,
+      y = "Relative to RPMI-control (%)"
+    ) +
+    
+    theme_classic(
+      base_size = 16
+    ) +
+    
+    theme(
+      axis.line = element_line(
+        colour = "black",
+        linewidth = 1
+      ),
+      
+      axis.ticks = element_line(
+        colour = "black",
+        linewidth = 0.8
+      ),
+      
+      axis.ticks.length = unit(
+        0.2,
+        "cm"
+      ),
+      
+      axis.text.x = element_text(
+        angle = 45,
+        hjust = 1,
+        # Increase size below to give x titles
+        size = 0
+      ),
+      
+      plot.title = element_text(
+        face = "bold",
+        size = 10
+      ),
+      
+      plot.subtitle = element_text(
+        size = 13
+      ),
+      
+      legend.position = "right",
+      
+      plot.margin = margin(
+        10,
+        20,
+        10,
+        10
+      )
+    )
+  
+  # ----------------------------------------------------------
+  # Add significant pairwise comparisons
+  # ----------------------------------------------------------
+  
+  if (nrow(sig_dat) > 0) {
+    
+    bracket_height <- 0.025 *
+      y_range
+    
+    p <- p +
+      
+      # Horizontal bracket
+      geom_segment(
+        data = sig_dat,
+        aes(
+          x = x_left,
+          xend = x_right,
+          y = y_position,
+          yend = y_position
+        ),
+        inherit.aes = FALSE,
+        linewidth = 0.6
+      ) +
+      
+      # Left vertical bracket
+      geom_segment(
+        data = sig_dat,
+        aes(
+          x = x_left,
+          xend = x_left,
+          y = y_position,
+          yend =
+            y_position -
+            bracket_height
+        ),
+        inherit.aes = FALSE,
+        linewidth = 0.6
+      ) +
+      
+      # Right vertical bracket
+      geom_segment(
+        data = sig_dat,
+        aes(
+          x = x_right,
+          xend = x_right,
+          y = y_position,
+          yend =
+            y_position -
+            bracket_height
+        ),
+        inherit.aes = FALSE,
+        linewidth = 0.6
+      ) +
+      
+      # Significance label
+      geom_text(
+        data = sig_dat,
+        aes(
+          x = (x_left + x_right) / 2,
+          y = y_position,
+          label = significance
+        ),
+        inherit.aes = FALSE,
+        vjust = -0.25,
+        size = 5
+      )
+    
+  }
+  
+  # ----------------------------------------------------------
+  # Make enough room above the plot for annotations
+  # ----------------------------------------------------------
+  
+  if (nrow(sig_dat) > 0) {
+    
+    highest_annotation <- max(
+      sig_dat$y_position,
+      na.rm = TRUE
+    )
+    
+    p <- p +
+      coord_cartesian(
+        ylim = c(
+          NA,
+          highest_annotation +
+            0.12 * y_range
+        ),
+        clip = "off"
+      )
+    
+  } else {
+    
+    p <- p +
+      coord_cartesian(
+        ylim = c(
+          NA,
+          overall_y +
+            0.08 * y_range
+        ),
+        clip = "off"
+      )
+    
+  }
+  
+  return(p)
+}
+
+
+
+# ============================================================
+# 14. CREATE ALL OUTCOME PLOTS
+# ============================================================
+
+plot_list <- map(
+  outcomes,
+  plot_outcome
+)
+
+
+names(plot_list) <- outcomes
+
+
+# ------------------------------------------------------------
+# Display plots individually
+# ------------------------------------------------------------
+
+walk(
+  plot_list,
+  print
+)
+
+
+# ============================================================
+# 15. SINGLE-CELL DISTRIBUTION / VIOLIN PLOTS
+# ============================================================
+#
+# These plots are purely descriptive.
+#
+# They show:
+#   - violin = distribution of individual cells/puncta
+#   - boxplot = median + IQR
+#   - red diamond = mean
+#   - coloured points = individual observations
+#
+# NO STATISTICAL TESTS OR SIGNIFICANCE ANNOTATIONS ARE
+# APPLIED TO THESE PLOTS.
+# ============================================================
+
+plot_single_cell <- function(outcome_name) {
+  
+  dat <- Data_analysis_GPX4 %>%
+    filter(
+      !is.na(.data[[outcome_name]])
+    )
+  
+  
+  if (nrow(dat) == 0) {
+    
+    stop(
+      paste0(
+        "No data found for outcome: ",
+        outcome_name
+      )
+    )
+    
+  }
+  
+  
+  ggplot(
+    dat,
+    aes(
+      x = Treatment,
+      y = .data[[outcome_name]]
+    )
+  ) +
+    
+    # --------------------------------------------------------
+  # Violin: distribution of individual observations
+  # --------------------------------------------------------
+  
+  geom_violin(
+    aes(
+      fill = Treatment
+    ),
+    alpha = 0.35,
+    trim = FALSE,
+    colour = "black"
+  ) +
+    
+    # --------------------------------------------------------
+  # Boxplot
+  # --------------------------------------------------------
+  
+  geom_boxplot(
+    width = 0.12,
+    coef = Inf,
+    outlier.shape = NA,
+    fill = "white",
+    colour = "black"
+  ) +
+    
+    # --------------------------------------------------------
+  # Mean
+  # --------------------------------------------------------
+  
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    shape = 18,
+    size = 3,
+    colour = "red"
+  ) +
+    
+    # --------------------------------------------------------
+  # Individual observations
+  # --------------------------------------------------------
+  
+  geom_jitter(
+    aes(
+      colour = Treatment
+    ),
+    width = 0.12,
+    height = 0,
+    alpha = 0.7,
+    size = 1.8
+  ) +
+    
+    # --------------------------------------------------------
+  # Treatment colours
+  # --------------------------------------------------------
+  
+  scale_fill_manual(
+    values = treatment_colours,
+    drop = FALSE
+  ) +
+    
+    scale_colour_manual(
+      values = treatment_colours,
+      drop = FALSE
+    ) +
+    
+    # --------------------------------------------------------
+  # Labels
+  # --------------------------------------------------------
+  
+  labs(
+    title = outcome_name,
+    x = NULL,
+    y = outcome_name
+  ) +
+    
+    # --------------------------------------------------------
+  # Theme
+  # --------------------------------------------------------
+  
+  theme_classic(
+    base_size = 16
+  ) +
+    
+    theme(
+      axis.text.x = element_text(
+        size = 12,
+        angle = 45,
+        hjust = 1
+      ),
+      
+      axis.text.y = element_text(
+        size = 14
+      ),
+      
+      axis.title.x = element_text(
+        size = 16
+      ),
+      
+      axis.title.y = element_text(
+        size = 16
+      ),
+      
+      plot.title = element_text(
+        face = "bold"
+      ),
+      
+      legend.position = "none"
+    )
+}
+
+
+# ============================================================
+# CREATE SINGLE-CELL VIOLIN PLOTS
+# ============================================================
+
+single_cell_plot_list <- map(
+  outcomes,
+  plot_single_cell
+)
+
+
+names(single_cell_plot_list) <- outcomes
+
+
+# Display all violin plots
+
+walk(
+  single_cell_plot_list,
+  print
+)
+
+
+# ============================================================
+# 16. EXPLORATORY CORRELATION - ASPECT RATIO / HIGH-INTENSITY PUNCTA
+# ============================================================
+
+if (
+  all(
+    c(
+      "Mean_Puncta_Intensity_High",
+      "Aspect_Ratio"
+    ) %in%
+    names(Data_analysis_GPX4)
+  )
+) {
+  
+  aspect_ratio_high_plot <- ggplot(
+    Data_analysis_GPX4,
+    aes(
+      x = Mean_Puncta_Intensity_High,
+      y = Aspect_Ratio
+    )
+  ) +
+    
+    geom_violin(
+      fill = "lightblue",
+      alpha = 0.4,
+      trim = FALSE
+    ) +
+    
+    geom_boxplot(
+      width = 0.12,
+      coef = Inf,
+      outlier.shape = NA,
+      fill = "white"
+    ) +
+    
+    stat_summary(
+      fun = mean,
+      geom = "point",
+      shape = 18,
+      size = 3,
+      colour = "red"
+    ) +
+    
+    geom_jitter(
+      aes(
+        colour = Mean_Puncta_Intensity_High
+      ),
+      width = 0.12,
+      height = 0,
+      alpha = 0.7,
+      size = 1.8
+    ) +
+    
+    theme_classic(
+      base_size = 16
+    ) +
+    
+    theme(
+      axis.text.x = element_text(
+        size = 12,
+        angle = 45,
+        hjust = 1
+      ),
+      
+      axis.text.y = element_text(
+        size = 14
+      ),
+      
+      axis.title.x = element_text(
+        size = 16
+      ),
+      
+      axis.title.y = element_text(
+        size = 16
+      ),
+      
+      legend.position = "none"
+    )
+  
+  
+  print(aspect_ratio_high_plot)
+  
+}
+
+
+# ============================================================
+# 17. EXPLORATORY CORRELATION:
+# FRACTION PUNCTA SIGNAL % / ASPECT RATIO
+# ============================================================
+
+if (
+  all(
+    c(
+      "Fraction_Puncta_Signal_percent",
+      "Aspect_Ratio",
+      "Mean_Puncta_Intensity"
+    ) %in%
+    names(Data_analysis_GPX4)
+  )
+) {
+  
+  correlation_model_signal <- lm(
+    Fraction_Puncta_Signal_percent ~
+      Aspect_Ratio *
+      Mean_Puncta_Intensity,
+    data = Data_analysis_GPX4
+  )
+  
+  
+  print(
+    summary(
+      correlation_model_signal
+    )
+  )
+  
+  
+  correlation_plot_signal <- ggplot(
+    Data_analysis_GPX4,
+    aes(
+      x = Fraction_Puncta_Signal_percent,
+      y = Aspect_Ratio,
+      colour = Mean_Puncta_Intensity
+    )
+  ) +
+    
+    geom_point(
+      alpha = 0.7
+    ) +
+    
+    geom_smooth(
+      method = "lm",
+      se = TRUE
+    ) +
+    
+    theme_classic(
+      base_size = 16
+    )
+  
+  
+  print(correlation_plot_signal)
+  
+}
+
+
+# ============================================================
+# 18. EXPLORATORY CORRELATION:
+# FRACTION PUNCTA AREA % / ASPECT RATIO
+# ============================================================
+
+if (
+  all(
+    c(
+      "Fraction_Puncta_Area_percent",
+      "Aspect_Ratio",
+      "Mean_Puncta_Intensity"
+    ) %in%
+    names(Data_analysis_GPX4)
+  )
+) {
+  
+  correlation_model_area <- lm(
+    Fraction_Puncta_Area_percent ~
+      Aspect_Ratio *
+      Mean_Puncta_Intensity,
+    data = Data_analysis_GPX4
+  )
+  
+  
+  print(
+    summary(
+      correlation_model_area
+    )
+  )
+  
+  
+  correlation_plot_area <- ggplot(
+    Data_analysis_GPX4,
+    aes(
+      x = Fraction_Puncta_Area_percent,
+      y = Aspect_Ratio,
+      colour = Mean_Puncta_Intensity
+    )
+  ) +
+    
+    geom_point(
+      alpha = 0.7
+    ) +
+    
+    geom_smooth(
+      method = "lm",
+      se = TRUE
+    ) +
+    
+    theme_classic(
+      base_size = 16
+    )
+  
+  
+  print(correlation_plot_area)
+  
+}
+
+
+# ============================================================
+# 19. EXPLORATORY CORRELATION:
+# CELL INTENSITY / ASPECT RATIO
+# ============================================================
+
+if (
+  all(
+    c(
+      "Cell_Mean_Intensity",
+      "Aspect_Ratio",
+      "Mean_Puncta_Intensity"
+    ) %in%
+    names(Data_analysis_GPX4)
+  )
+) {
+  
+  correlation_model_cell_intensity <- lm(
+    Cell_Mean_Intensity ~
+      Aspect_Ratio *
+      Mean_Puncta_Intensity,
+    data = Data_analysis_GPX4
+  )
+  
+  
+  print(
+    summary(
+      correlation_model_cell_intensity
+    )
+  )
+  
+  
+  correlation_plot_cell_intensity <- ggplot(
+    Data_analysis_GPX4,
+    aes(
+      x = Cell_Mean_Intensity,
+      y = Aspect_Ratio,
+      colour = Mean_Puncta_Intensity
+    )
+  ) +
+    
+    geom_point(
+      alpha = 0.7
+    ) +
+    
+    geom_smooth(
+      method = "lm",
+      se = TRUE
+    ) +
+    
+    theme_classic(
+      base_size = 16
+    )
+  
+  
+  print(correlation_plot_cell_intensity)
+  
+}
+
+
+# ============================================================
+# 20. FINAL RESULTS
+# ============================================================
+
+# ------------------------------------------------------------
+# Overall tests
+# ------------------------------------------------------------
+
+print(overall_results)
+
+
+# ------------------------------------------------------------
+# Normality assessment
+# ------------------------------------------------------------
+
+print(normality_results)
+
+
+# ------------------------------------------------------------
+# Pairwise comparisons
+# ------------------------------------------------------------
+
+print(pairwise_results)
+
+
+# ------------------------------------------------------------
+# Estimated marginal means
+# ------------------------------------------------------------
+
+print(estimated_means)
+
+
+# ------------------------------------------------------------
+# Replicate means used for the statistical analysis
+# ------------------------------------------------------------
+
+print(replicate_means)
+
+
+# ------------------------------------------------------------
+# Normalised data used for plotting
+# ------------------------------------------------------------
+
+print(replicate_means_normalised)
