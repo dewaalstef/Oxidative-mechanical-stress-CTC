@@ -1,0 +1,103 @@
+// Before running, have the MIP and its cell segmentation ROI open in Fiji
+// Subtract background
+run("Subtract Background...", "rolling=75");
+roiManager("Measure");
+String.copyResults;
+
+// Paste in Excel/other spreadsheet software if you want the measurements of the cell ROIs post-subtract background
+// When used in tandem with puncta-analysis.py, this copying-pasting process is not necessary
+
+roiManager("Deselect");
+
+// Threshold - change the minimum to capture the top 1% brightest pixels 
+setThreshold(97, 255);
+setOption("BlackBackground", true);
+run("Convert to Mask");
+
+// Assign ROIs of cell segmentation to group 1
+n = roiManager("count");
+CellCount=n;
+idx = newArray(n);
+
+for (i = 0; i < n; i++) {
+    idx[i] = i;
+}
+
+roiManager("Select", idx);
+run("Select All");
+RoiManager.setGroup(1);
+RoiManager.setPosition(0);
+roiManager("Deselect");
+
+// Create new ROIs for puncta (.15 for in vitro, maybe change for ex vivo)
+roiManager("Set Line Width", 0);
+run("Analyze Particles...", "size=0.15-30.00 add");
+run("Select None");
+roiManager("Deselect");
+
+// Assign ROIs of puncta to group 2
+// CellCount=21; <<< here for manual troubleshooting using MAX_4HNE_protocol... DMSO 0.3% from test 3
+TotalCount = roiManager("count");
+PunctaCount = TotalCount-CellCount;
+// print(TotalCount);
+// print(CellCount);
+// print(PunctaCount);
+idx2 = newArray(PunctaCount);
+
+for (i = 0; i < PunctaCount; i++) {
+    idx2[i] = CellCount+i;
+}
+
+roiManager("Select", idx2);
+RoiManager.setGroup(2);
+RoiManager.setPosition(0);
+roiManager("Deselect");
+
+// Save all ROIs
+
+ 
+// GET IMAGE PATH INFO 
+fullPath = getDirectory("image");
+fileName = getTitle();
+
+// remove extension for clean naming
+dot = lastIndexOf(fileName, ".");
+baseName = substring(fileName, 0, dot);
+
+ 
+// CREATE ROI OUTPUT FOLDER
+roiFolder = fullPath + "Roi_Sets";
+
+if (!File.exists(roiFolder)) {
+    File.makeDirectory(roiFolder);
+}
+
+
+n = roiManager("count");
+idx3 = newArray(n);
+
+for (i = 0; i < n; i++) {
+    idx3[i] = i;
+}
+
+
+roiManager("Select", idx3);
+
+
+// SAVE ROI ZIP
+savePath = roiFolder + File.separator + baseName + "_ROIs.zip";
+
+roiManager("Save", savePath);
+
+print("Saved ROIs to: " + savePath);
+
+metadataPath = roiFolder + File.separator + baseName + "_metadata.txt";
+
+File.saveString(
+    "CellCount=" + CellCount + "\n" +
+    "TotalROIs=" + TotalCount + "\n" +
+    "PunctaCount=" + PunctaCount,
+    metadataPath
+);
+
+print("Saved metadata to: " + metadataPath);
