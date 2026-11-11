@@ -1,0 +1,1673 @@
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(purrr)
+library(broom)
+library(emmeans)
+library(tibble)
+library(ggbreak)
+library(FSA)
+
+# ============================================================
+# 1. PREPARE DATA
+# ============================================================
+
+# add directory
+shearstressdata <- read_excel([...]
+                              sheet = "Data")
+#View(shearstressdata)
+
+
+shearstressdata <- shearstressdata %>%
+  rename(
+    percent_decrease_cell_count =
+      `percent-decrease-cell-count-after-shear-stress`,
+    percent_dead_end =
+      `percent-dead-end-time-series`
+  )
+
+
+# ============================================================
+# 2. REMOVE UNWANTED CONDITIONS
+# ============================================================
+
+# Remove no-shear stress data
+shearstressdata <- shearstressdata %>%
+  filter(
+    !Test %in% c(
+      "Untreated without shear stress",
+      "z-VAD-FMK+Artesunate without shear stress",
+      "Necrostatin+Artesunate without shear stress",
+      "H2O2 without shear stress"
+    )
+  )
+
+shearstressdata <- droplevels(shearstressdata)
+
+
+# Remove specific unwated data points
+shearstressdata <- shearstressdata %>%
+  filter(N != 21) 
+
+# shearstressdata <- shearstressdata %>%
+#   filter(N != 22) 
+
+shearstressdata <- shearstressdata %>%
+  filter(Test != "z-VAD-FMK+Artesunate")
+
+
+# ============================================================
+# 3. DEFINE TREATMENT ORDER
+# ============================================================
+
+shearstressdata$Test <- factor(
+  shearstressdata$Test,
+  levels = c(
+    "Untreated",
+    "Untreated without shear stress",
+    "Artesunate",
+    "z-VAD-FMK+Artesunate",
+    "z-VAD-FMK+Artesunate without shear stress",
+    "Necrostatin+Artesunate",
+    "Necrostatin+Artesunate without shear stress",
+    "Ferrostatin+Artesunate",
+    "NAC+Artesunate",
+    "H2O2",
+    "H2O2 without shear stress"
+  )
+)
+
+
+
+# ============================================================
+# 4. DEFINE TREATMENT COLOURS
+# ============================================================
+
+
+treatment_colours <- c(
+  "Untreated" = "#F9918A",
+  "Artesunate" = "#08BC3E",
+  "NAC+Artesunate" = "#77aaff",
+  "Necrostatin+Artesunate" = "#653ea3",
+  "Ferrostatin+Artesunate" = "#c29148",
+  "H2O2" = "#F0EBF2"
+)
+
+
+
+
+
+
+# ============================================================
+# 5. CHECK EXPERIMENTAL DESIGN
+# ============================================================
+
+replicate_check <- shearstressdata %>%
+  count(Test)
+
+# View(replicate_check)
+
+
+# ============================================================
+# 6. DEFINE MAIN OUTCOMES
+# ============================================================
+
+main_outcomes <- c(
+  "percent_decrease_cell_count",
+  "percent_dead_end"
+)
+
+
+# ============================================================
+# 7. DESCRIPTIVE STATISTICS
+# ============================================================
+
+descriptive_statistics <- shearstressdata %>%
+  pivot_longer(
+    cols = all_of(main_outcomes),
+    names_to = "Outcome",
+    values_to = "Value"
+  ) %>%
+  group_by(
+    Outcome,
+    Test
+  ) %>%
+  summarise(
+    n = sum(!is.na(Value)),
+    mean = mean(Value, na.rm = TRUE),
+    sd = sd(Value, na.rm = TRUE),
+    sem = sd / sqrt(n),
+    median = median(Value, na.rm = TRUE),
+    min = min(Value, na.rm = TRUE),
+    max = max(Value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# View(descriptive_statistics)
+
+
+# ============================================================
+# 8. AUTOMATIC STATISTICAL TEST SELECTION
+#
+# Workflow:
+#
+# 1. Fit Value ~ Test
+# 2. Check normality of model residuals using Shapiro-Wilk
+# 3. If residuals are reasonably normal:
+#       -> one-way ANOVA
+#       -> Tukey-adjusted all-pairwise comparisons
+#
+# 4. If residuals are not reasonably normal:
+#       -> Kruskal-Wallis
+#       -> Dunn's multiple comparisons test
+#          with Holm adjustment
+#
+# IMPORTANT:
+# Normality is assessed on MODEL RESIDUALS rather than
+# separately within each treatment group.
+#
+# ============================================================
+
+
+
+run_model <- function(data, outcome) {
+  
+  dat <- data %>%
+    select(
+      Test,
+      all_of(outcome)
+    ) %>%
+    rename(
+      Value = all_of(outcome)
+    ) %>%
+    filter(
+      !is.na(Value)
+    )
+  
+  
+  # Remove unused treatment levels
+  
+  dat$Test <- droplevels(dat$Test)
+  
+  
+  # ----------------------------------------------------------
+  # Linear model
+  # ----------------------------------------------------------
+  
+  model <- lm(
+    Value ~ Test,
+    data = dat
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Normality of model residuals
+  #
+  # Shapiro-Wilk is applied to the residuals of the model,
+  # not separately to each treatment.
+  # ----------------------------------------------------------
+  
+  residuals_model <- residuals(model)
+  
+  
+  if (
+    length(residuals_model) >= 3 &&
+    length(residuals_model) <= 5000
+  ) {
+    
+    shapiro_result <- shapiro.test(
+      residuals_model
+    )
+    
+    normality_p <- shapiro_result$p.value
+    
+  } else {
+    
+    normality_p <- NA_real_
+    
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Decide which statistical framework to use
+  # ----------------------------------------------------------
+  
+  # If normality cannot be assessed, use the non-parametric
+  # approach rather than automatically assuming normality.
+  
+  use_anova <- !is.na(normality_p) &&
+    normality_p > 0.05
+  
+  
+  # ==========================================================
+  # PARAMETRIC BRANCH
+  # ==========================================================
+  
+  if (use_anova) {
+    
+    
+    # --------------------------------------------------------
+    # One-way ANOVA
+    # --------------------------------------------------------
+    
+    treatment_anova <- anova(model)
+    
+    treatment_result <- tibble(
+      Outcome = outcome,
+      test_method = "ANOVA",
+      normality_p = normality_p,
+      statistic = treatment_anova["Test", "F value"],
+      df = treatment_anova["Test", "Df"],
+      p_value = treatment_anova["Test", "Pr(>F)"]
+    )
+    
+    
+    # --------------------------------------------------------
+    # Estimated marginal means
+    # --------------------------------------------------------
+    
+    emm <- emmeans(
+      model,
+      ~ Test
+    )
+    
+    
+    # --------------------------------------------------------
+    # ALL pairwise comparisons
+    #
+    # Tukey adjustment is used because there are many
+    # pairwise treatment comparisons.
+    # --------------------------------------------------------
+    
+    pairwise_raw <- contrast(
+      emm,
+      method = "pairwise",
+      adjust = "tukey"
+    ) %>%
+      as.data.frame() %>%
+      as_tibble()
+    
+    
+    # --------------------------------------------------------
+    # Construct treatment pairs directly from factor levels.
+    #
+    # This avoids problems with special characters such as "+"
+    # appearing in treatment names.
+    # --------------------------------------------------------
+    
+    treatment_levels <- levels(dat$Test)
+    
+    expected_pairs <- combn(
+      treatment_levels,
+      2,
+      simplify = FALSE
+    )
+    
+    expected_group1 <- map_chr(
+      expected_pairs,
+      ~ .x[1]
+    )
+    
+    expected_group2 <- map_chr(
+      expected_pairs,
+      ~ .x[2]
+    )
+    
+    
+    if (nrow(pairwise_raw) != length(expected_pairs)) {
+      
+      stop(
+        paste0(
+          "Number of Tukey pairwise comparisons (",
+          nrow(pairwise_raw),
+          ") does not match the expected number of treatment pairs (",
+          length(expected_pairs),
+          ")."
+        )
+      )
+      
+    }
+    
+    
+    pairwise <- pairwise_raw %>%
+      mutate(
+        Outcome = outcome,
+        test_method = "Tukey",
+        group1 = expected_group1,
+        group2 = expected_group2
+      ) %>%
+      select(
+        Outcome,
+        test_method,
+        group1,
+        group2,
+        contrast,
+        estimate,
+        SE,
+        df,
+        t.ratio,
+        p.value
+      )
+    
+    
+    # --------------------------------------------------------
+    # Return results
+    # --------------------------------------------------------
+    
+    return(
+      list(
+        model = model,
+        treatment_result = treatment_result,
+        pairwise = pairwise,
+        emmeans = as.data.frame(emm),
+        normality = tibble(
+          Outcome = outcome,
+          normality_test = "Shapiro-Wilk on model residuals",
+          normality_p = normality_p,
+          selected_test = "ANOVA + Tukey"
+        )
+      )
+    )
+    
+  }
+  
+  
+  # ==========================================================
+  # NON-PARAMETRIC BRANCH
+  # ==========================================================
+  
+  
+  # ----------------------------------------------------------
+  # Kruskal-Wallis test
+  # ----------------------------------------------------------
+  
+  kw_result <- kruskal.test(
+    Value ~ Test,
+    data = dat
+  )
+  
+  
+  treatment_result <- tibble(
+    Outcome = outcome,
+    test_method = "Kruskal-Wallis",
+    normality_p = normality_p,
+    statistic = unname(kw_result$statistic),
+    df = unname(kw_result$parameter),
+    p_value = kw_result$p.value
+  )
+  
+  
+  # ----------------------------------------------------------
+  # Dunn's multiple comparisons test
+  #
+  # Holm adjustment is used for the complete family of
+  # pairwise comparisons.
+  # ----------------------------------------------------------
+  
+  dunn_raw <- FSA::dunnTest(
+    Value ~ Test,
+    data = dat,
+    method = "holm"
+  )$res %>%
+    as_tibble()
+  
+  
+  # ----------------------------------------------------------
+  # Recover the actual treatment names from the Dunn output.
+  #
+  # FSA reports comparisons as:
+  #
+  # Treatment A - Treatment B
+  # ----------------------------------------------------------
+  
+  dunn_pairs <- strsplit(
+    as.character(dunn_raw$Comparison),
+    " - ",
+    fixed = TRUE
+  )
+  
+  
+  dunn_group1 <- map_chr(
+    dunn_pairs,
+    ~ .x[1]
+  )
+  
+  dunn_group2 <- map_chr(
+    dunn_pairs,
+    ~ .x[2]
+  )
+  
+  
+  pairwise <- dunn_raw %>%
+    mutate(
+      Outcome = outcome,
+      test_method = "Dunn",
+      group1 = dunn_group1,
+      group2 = dunn_group2,
+      estimate = NA_real_,
+      SE = NA_real_,
+      df = NA_real_,
+      t.ratio = Z,
+      p.value = P.adj
+    ) %>%
+    select(
+      Outcome,
+      test_method,
+      group1,
+      group2,
+      Comparison,
+      estimate,
+      SE,
+      df,
+      t.ratio,
+      p.value,
+      P.unadj,
+      P.adj
+    )
+  
+  
+  # ----------------------------------------------------------
+  # Return results
+  # ----------------------------------------------------------
+  
+  list(
+    model = model,
+    treatment_result = treatment_result,
+    pairwise = pairwise,
+    emmeans = NULL,
+    normality = tibble(
+      Outcome = outcome,
+      normality_test = "Shapiro-Wilk on model residuals",
+      normality_p = normality_p,
+      selected_test = "Kruskal-Wallis + Dunn"
+    )
+  )
+  
+}
+
+
+# ============================================================
+# 9. RUN MODELS FOR MAIN OUTCOMES
+# ============================================================
+
+model_results <- map(
+  main_outcomes,
+  ~ run_model(
+    shearstressdata,
+    .x
+  )
+)
+
+names(model_results) <- main_outcomes
+
+
+# ============================================================
+# OVERALL TEST RESULTS
+# ============================================================
+
+anova_results <- map_dfr(
+  model_results,
+  "treatment_result"
+)
+
+# View(anova_results)
+
+
+# ============================================================
+# NORMALITY / TEST SELECTION RESULTS
+# ============================================================
+
+normality_results <- map_dfr(
+  model_results,
+  "normality"
+)
+
+# View(normality_results)
+
+
+# ============================================================
+# ALL PAIRWISE COMPARISONS
+#
+# ANOVA branch:
+#   Tukey-adjusted p-values
+#
+# Kruskal-Wallis branch:
+#   Dunn Holm-adjusted p-values
+# ============================================================
+
+pairwise_results <- map_dfr(
+  model_results,
+  "pairwise"
+)
+
+# View(pairwise_results)
+
+
+# ============================================================
+# ESTIMATED TREATMENT MEANS
+#
+# Available for the ANOVA branch.
+# For Kruskal-Wallis outcomes, emmeans are not calculated.
+# ============================================================
+
+estimated_means <- map_dfr(
+  model_results,
+  "emmeans"
+) %>%
+  rename(
+    estimated_mean = emmean,
+    SE = SE,
+    df = df
+  )
+
+# View(estimated_means)
+
+
+# ============================================================
+# 10. FUNCTION TO CREATE SIGNIFICANCE LABELS
+# ============================================================
+
+p_to_stars <- function(p) {
+  
+  case_when(
+    is.na(p) ~ "",
+    p <= 0.0001 ~ "****",
+    p <= 0.001  ~ "***",
+    p <= 0.01   ~ "**",
+    p <= 0.05   ~ "*",
+    TRUE        ~ ""
+  )
+}
+
+
+# ============================================================
+# 11. UNTREATED COMPARISONS
+#
+# These are retained as a separate statistical output.
+#
+# ANOVA:
+#   emmeans treatment-vs-control contrasts
+#   Holm adjustment
+#
+# Kruskal-Wallis:
+#   Dunn comparisons against Untreated
+#   Holm adjustment
+# ============================================================
+
+get_untreated_stats <- function(data, outcome) {
+  
+  
+  dat <- data %>%
+    select(
+      Test,
+      all_of(outcome)
+    ) %>%
+    rename(
+      Value = all_of(outcome)
+    ) %>%
+    filter(
+      !is.na(Value)
+    )
+  
+  
+  dat$Test <- droplevels(dat$Test)
+  
+  
+  model <- lm(
+    Value ~ Test,
+    data = dat
+  )
+  
+  
+  residuals_model <- residuals(model)
+  
+  
+  if (
+    length(residuals_model) >= 3 &&
+    length(residuals_model) <= 5000
+  ) {
+    
+    normality_p <- shapiro.test(
+      residuals_model
+    )$p.value
+    
+  } else {
+    
+    normality_p <- NA_real_
+    
+  }
+  
+  
+  use_anova <- !is.na(normality_p) &&
+    normality_p > 0.05
+  
+  
+  # ==========================================================
+  # ANOVA BRANCH
+  # ==========================================================
+  
+  if (use_anova) {
+    
+    emm <- emmeans(
+      model,
+      ~ Test
+    )
+    
+    
+    comparisons <- contrast(
+      emm,
+      method = "trt.vs.ctrl",
+      ref = "Untreated",
+      adjust = "holm"
+    ) %>%
+      as.data.frame() %>%
+      as_tibble()
+    
+    
+    return(
+      comparisons %>%
+        mutate(
+          Outcome = outcome,
+          test_method = "ANOVA / emmeans",
+          significance = p_to_stars(p.value)
+        )
+    )
+    
+  }
+  
+  
+  # ==========================================================
+  # KRUSKAL-WALLIS / DUNN BRANCH
+  # ==========================================================
+  
+  dunn_raw <- FSA::dunnTest(
+    Value ~ Test,
+    data = dat,
+    method = "none"
+  )$res %>%
+    as_tibble()
+  
+  
+  # Extract treatment names
+  
+  dunn_pairs <- strsplit(
+    as.character(dunn_raw$Comparison),
+    " - ",
+    fixed = TRUE
+  )
+  
+  
+  dunn_group1 <- map_chr(
+    dunn_pairs,
+    ~ .x[1]
+  )
+  
+  dunn_group2 <- map_chr(
+    dunn_pairs,
+    ~ .x[2]
+  )
+  
+  
+  untreated_comparisons <- dunn_raw %>%
+    mutate(
+      group1 = dunn_group1,
+      group2 = dunn_group2
+    ) %>%
+    filter(
+      group1 == "Untreated" |
+        group2 == "Untreated"
+    ) %>%
+    mutate(
+      p.value = p.adjust(
+        P.unadj,
+        method = "holm"
+      ),
+      Outcome = outcome,
+      test_method = "Kruskal-Wallis / Dunn",
+      significance = p_to_stars(p.value)
+    )
+  
+  
+  untreated_comparisons
+  
+}
+
+
+untreated_stats <- map_dfr(
+  main_outcomes,
+  ~ get_untreated_stats(
+    shearstressdata,
+    .x
+  )
+)
+
+# View(untreated_stats)
+
+
+# ============================================================
+# 12. FUNCTION FOR PAIRWISE STATISTICAL ANNOTATIONS
+#
+# Shows ALL significant pairwise comparisons.
+#
+# ANOVA:
+#   Tukey-adjusted
+#
+# Kruskal-Wallis:
+#   Dunn + Holm-adjusted
+# ============================================================
+
+add_stat_annotations <- function(
+    plot,
+    data,
+    outcome,
+    anova_table,
+    pairwise_table
+) {
+  
+  
+  dat <- data %>%
+    select(
+      Test,
+      all_of(outcome)
+    ) %>%
+    rename(
+      Value = all_of(outcome)
+    ) %>%
+    filter(
+      !is.na(Value)
+    )
+  
+  
+  dat$Test <- droplevels(dat$Test)
+  
+  
+  # ----------------------------------------------------------
+  # Overall test information
+  # ----------------------------------------------------------
+  
+  overall_result <- anova_table %>%
+    filter(
+      Outcome == outcome
+    )
+  
+  
+  if (nrow(overall_result) == 0) {
+    
+    test_method <- "Statistical test"
+    overall_p <- NA_real_
+    
+  } else {
+    
+    test_method <- overall_result$test_method[1]
+    overall_p <- overall_result$p_value[1]
+    
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Dynamic overall-test label
+  # ----------------------------------------------------------
+  
+  if (test_method == "ANOVA") {
+    
+    test_name <- "ANOVA"
+    
+  } else if (test_method == "Kruskal-Wallis") {
+    
+    test_name <- "Kruskal-Wallis"
+    
+  } else {
+    
+    test_name <- test_method
+    
+  }
+  
+  
+  if (is.na(overall_p)) {
+    
+    overall_label <- paste0(
+      test_name,
+      ": p = NA"
+    )
+    
+  } else if (overall_p < 0.001) {
+    
+    overall_label <- paste0(
+      test_name,
+      ": p < 0.001"
+    )
+    
+  } else {
+    
+    overall_label <- paste0(
+      test_name,
+      ": p = ",
+      format.pval(
+        overall_p,
+        digits = 3,
+        eps = 0.001
+      )
+    )
+    
+  }
+  
+  
+  # ----------------------------------------------------------
+  # ALL significant pairwise comparisons
+  #
+  # p.value is already adjusted:
+  #
+  # ANOVA       -> Tukey
+  # Kruskal     -> Dunn + Holm
+  # ----------------------------------------------------------
+  
+  stats <- pairwise_table %>%
+    filter(
+      Outcome == outcome,
+      !is.na(p.value),
+      p.value <= 0.05
+    ) %>%
+    mutate(
+      significance = p_to_stars(p.value)
+    )
+  
+  
+  # ----------------------------------------------------------
+  # Convert treatment names to x-axis positions
+  # ----------------------------------------------------------
+  
+  if (nrow(stats) > 0) {
+    
+    stats <- stats %>%
+      mutate(
+        x1 = match(
+          group1,
+          levels(dat$Test)
+        ),
+        x2 = match(
+          group2,
+          levels(dat$Test)
+        )
+      ) %>%
+      filter(
+        !is.na(x1),
+        !is.na(x2)
+      ) %>%
+      mutate(
+        x_min = pmin(x1, x2),
+        x_max = pmax(x1, x2)
+      )
+    
+    
+    # --------------------------------------------------------
+    # Calculate bracket heights
+    # --------------------------------------------------------
+    
+    y_max <- max(
+      dat$Value,
+      na.rm = TRUE
+    )
+    
+    y_min <- min(
+      dat$Value,
+      na.rm = TRUE
+    )
+    
+    y_range <- y_max - y_min
+    
+    if (y_range == 0) {
+      y_range <- 1
+    }
+    
+    
+    bracket_step <- max(
+      y_range * 0.10,
+      1
+    )
+    
+    
+    bracket_height <- max(
+      y_range * 0.025,
+      0.25
+    )
+    
+    
+    # --------------------------------------------------------
+    # Arrange brackets
+    # --------------------------------------------------------
+    
+    stats <- stats %>%
+      arrange(
+        x_min,
+        x_max
+      )
+    
+    
+    # --------------------------------------------------------
+    # Assign vertical positions
+    # --------------------------------------------------------
+    
+    stats <- stats %>%
+      mutate(
+        y =
+          y_max +
+          seq_len(n()) * bracket_step,
+        
+        y_text =
+          y +
+          bracket_height
+      )
+    
+    
+    # --------------------------------------------------------
+    # Add brackets
+    # --------------------------------------------------------
+    
+    plot <- plot +
+      
+      geom_segment(
+        data = stats,
+        aes(
+          x = x_min,
+          xend = x_max,
+          y = y,
+          yend = y
+        ),
+        inherit.aes = FALSE,
+        colour = "black",
+        linewidth = 1.6
+      ) +
+      
+      geom_segment(
+        data = stats,
+        aes(
+          x = x_min,
+          xend = x_min,
+          y = y,
+          yend = y - bracket_height
+        ),
+        inherit.aes = FALSE,
+        colour = "black",
+        linewidth = 1.6
+      ) +
+      
+      geom_segment(
+        data = stats,
+        aes(
+          x = x_max,
+          xend = x_max,
+          y = y,
+          yend = y - bracket_height
+        ),
+        inherit.aes = FALSE,
+        colour = "black",
+        linewidth = 1.6
+      ) +
+      
+      geom_text(
+        data = stats,
+        aes(
+          x = (x_min + x_max) / 2,
+          y = y_text,
+          label = significance
+        ),
+        inherit.aes = FALSE,
+        size = 10
+      )
+    
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Determine upper plotting limit
+  # ----------------------------------------------------------
+  
+  if (nrow(stats) > 0) {
+    
+    upper_limit <- max(
+      max(dat$Value, na.rm = TRUE),
+      max(stats$y_text, na.rm = TRUE)
+    ) + bracket_step
+    
+  } else {
+    
+    y_max <- max(
+      dat$Value,
+      na.rm = TRUE
+    )
+    
+    y_min <- min(
+      dat$Value,
+      na.rm = TRUE
+    )
+    
+    y_range <- y_max - y_min
+    
+    if (y_range == 0) {
+      y_range <- 1
+    }
+    
+    upper_limit <- y_max + y_range * 0.10
+    
+  }
+  
+  
+  # ----------------------------------------------------------
+  # Add overall-test label and final y-limit
+  # ----------------------------------------------------------
+  
+  plot +
+    annotate(
+      "text",
+      x = 1,
+      y = upper_limit,
+      label = overall_label,
+      hjust = 0,
+      vjust = 1,
+      size = 35 / ggplot2::.pt
+    ) +
+    coord_cartesian(
+      ylim = c(
+        NA,
+        upper_limit
+      ),
+      clip = "off"
+    )
+}
+
+
+# ============================================================
+# 13. MAIN PLOT FUNCTION
+#
+# Individual observations + mean + SEM +
+# overall statistical test +
+# ALL significant pairwise comparisons.
+# ============================================================
+
+plot_outcome <- function(
+    data,
+    outcome,
+    y_label,
+    anova_table,
+    pairwise_table
+) {
+  
+  
+  dat <- data %>%
+    select(
+      Test,
+      all_of(outcome)
+    ) %>%
+    rename(
+      Value = all_of(outcome)
+    ) %>%
+    filter(
+      !is.na(Value)
+    )
+  
+  
+  dat$Test <- droplevels(dat$Test)
+  
+  
+  summary_dat <- dat %>%
+    group_by(Test) %>%
+    summarise(
+      n = n(),
+      mean = mean(Value),
+      sd = sd(Value),
+      sem = sd / sqrt(n),
+      .groups = "drop"
+    )
+  
+  
+  p <- ggplot(
+    dat,
+    aes(
+      x = Test,
+      y = Value
+    )
+  ) +
+    
+  # --------------------------------------------------------
+  # Individual observations
+  # --------------------------------------------------------
+  
+  geom_jitter(
+    aes(
+      fill = Test
+    ),
+    shape = 21,
+    colour = "black",
+    width = 0.08,
+    height = 0,
+    size = 8,
+    alpha = 0.85
+  ) +
+    scale_fill_manual(
+      values = treatment_colours,
+      drop = TRUE
+    ) +
+    
+    
+  # --------------------------------------------------------
+  # Mean
+  # --------------------------------------------------------
+  
+  geom_point(
+    data = summary_dat,
+    aes(
+      x = Test,
+      y = mean
+    ),
+    inherit.aes = FALSE,
+    shape = 18,
+    size = 6,
+    colour = "black"
+  ) +
+    
+    
+  # --------------------------------------------------------
+  # SEM
+  # --------------------------------------------------------
+  
+  geom_errorbar(
+    data = summary_dat,
+    aes(
+      x = Test,
+      ymin = mean - sem,
+      ymax = mean + sem
+    ),
+    inherit.aes = FALSE,
+    width = 0.12,
+    linewidth = 1.6,
+    colour = "black"
+  ) +
+    
+    
+  # --------------------------------------------------------
+  # Theme
+  # --------------------------------------------------------
+  
+  theme_minimal() +
+    
+    labs(
+      x = "Treatment",
+      y = y_label
+    ) +
+    
+    theme(
+      axis.text.x = element_text(
+        size = 0,
+        angle = 45,
+        hjust = 1
+      ),
+      axis.text.y = element_text(
+        size = 35
+      ),
+      axis.title.x = element_text(
+        size = 35
+      ),
+      axis.title.y = element_text(
+        size = 35
+      ),
+      panel.grid.minor = element_blank(),
+      axis.line = element_line(
+        colour = "black",
+        linewidth = 1.6
+      ),
+      axis.ticks = element_line(
+        colour = "black",
+        linewidth = 0.5
+      ),
+      legend.position = "none",
+      # legend.position = c(0.98, 0.98),
+      # legend.justification = c("right", "top"),
+      # legend.background = element_rect(
+      #   fill = "white",
+      #   colour = "black",
+      #   linewidth = 0.4
+      # ),
+      # legend.title = element_blank(),
+      # legend.text = element_text(size = 20),
+      plot.margin = margin(
+        10,
+        20,
+        10,
+        10
+      )
+    )
+  
+  
+  # ----------------------------------------------------------
+  # Add statistical annotations
+  # ----------------------------------------------------------
+  
+  add_stat_annotations(
+    p,
+    data,
+    outcome,
+    anova_table,
+    pairwise_table
+  )
+}
+
+
+# ============================================================
+# 14. PLOT: CELL COUNT DECREASE
+# ============================================================
+
+plot_detachment <- plot_outcome(
+  shearstressdata,
+  "percent_decrease_cell_count",
+  "Cell count decrease (%)",
+  anova_results,
+  pairwise_results
+)
+
+plot_detachment
+
+
+# ============================================================
+# 15. PLOT: DEAD CELLS
+# ============================================================
+
+plot_dead_cells <- plot_outcome(
+  shearstressdata,
+  "percent_dead_end",
+  "Dead cells post shear (%)",
+  anova_results,
+  pairwise_results
+)
+
+plot_dead_cells
+
+
+# ============================================================
+# 16. PHENOTYPE ANALYSIS
+# ============================================================
+
+phenotype_cols <- c(
+  "normalised cell size change",
+  "mitosis (%)",
+  "macrovacuoles (%)",
+  "fragmenting (%)",
+  "blebbing (%)",
+  "rolling (%)",
+  "detachment (%)",
+  "snake-like protrusion (%)"
+)
+
+
+# ============================================================
+# 17. CHECK PHENOTYPE DATA
+# ============================================================
+
+phenotype_check <- shearstressdata %>%
+  select(
+    Test,
+    all_of(phenotype_cols)
+  )
+
+# View(phenotype_check)
+
+
+# ============================================================
+# 18. PHENOTYPE SUMMARY
+# ============================================================
+
+phenotype_by_test <- shearstressdata %>%
+  group_by(Test) %>%
+  summarise(
+    across(
+      all_of(phenotype_cols),
+      ~ mean(.x, na.rm = TRUE)
+    ),
+    .groups = "drop"
+  )
+
+# View(phenotype_by_test)
+
+
+# ============================================================
+# 19. PHENOTYPE DATA LONG FORMAT
+# ============================================================
+
+# Convert phenotype columns to numeric
+shearstressdata <- shearstressdata %>%
+  mutate(
+    across(
+      all_of(phenotype_cols),
+      ~ as.numeric(as.character(.x))
+    )
+  )
+
+phenotype_long <- shearstressdata %>%
+  select(
+    Test,
+    all_of(phenotype_cols)
+  ) %>%
+  pivot_longer(
+    cols = all_of(phenotype_cols),
+    names_to = "Phenotype",
+    values_to = "Percentage"
+  )
+
+
+# ============================================================
+# 20. PHENOTYPE DESCRIPTIVE STATISTICS
+# ============================================================
+
+phenotype_statistics <- phenotype_long %>%
+  group_by(
+    Phenotype,
+    Test
+  ) %>%
+  summarise(
+    n = sum(!is.na(Percentage)),
+    mean = mean(Percentage, na.rm = TRUE),
+    sd = sd(Percentage, na.rm = TRUE),
+    sem = sd / sqrt(n),
+    median = median(Percentage, na.rm = TRUE),
+    min = min(Percentage, na.rm = TRUE),
+    max = max(Percentage, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# View(phenotype_statistics)
+
+
+# ============================================================
+# 21. PHENOTYPE MODELS
+#
+# The same automatic statistical selection is applied:
+#
+# Normal residuals:
+#   ANOVA + Tukey
+#
+# Non-normal residuals:
+#   Kruskal-Wallis + Dunn Holm
+# ============================================================
+
+phenotype_models <- map(
+  phenotype_cols,
+  ~ run_model(
+    shearstressdata,
+    .x
+  )
+)
+
+names(phenotype_models) <- phenotype_cols
+
+
+# ============================================================
+# OVERALL PHENOTYPE TEST RESULTS
+# ============================================================
+
+phenotype_anova_results <- map_dfr(
+  phenotype_models,
+  "treatment_result"
+)
+
+# View(phenotype_anova_results)
+
+
+# ============================================================
+# PHENOTYPE NORMALITY / TEST SELECTION
+# ============================================================
+
+phenotype_normality_results <- map_dfr(
+  phenotype_models,
+  "normality"
+)
+
+# View(phenotype_normality_results)
+
+
+# ============================================================
+# ALL PHENOTYPE PAIRWISE COMPARISONS
+# ============================================================
+
+phenotype_pairwise_results <- map_dfr(
+  phenotype_models,
+  "pairwise"
+)
+
+# View(phenotype_pairwise_results)
+
+
+# ============================================================
+# 22. PHENOTYPE COMPARISONS AGAINST UNTREATED
+#
+# Separate output
+# ============================================================
+
+phenotype_vs_untreated <- map_dfr(
+  phenotype_cols,
+  ~ get_untreated_stats(
+    shearstressdata,
+    .x
+  )
+)
+
+# View(phenotype_vs_untreated)
+
+
+# ============================================================
+# 23. INDIVIDUAL PHENOTYPE PLOTS
+#
+# Each phenotype gets its own plot.
+#
+# Each plot contains:
+#   - individual observations
+#   - mean
+#   - SEM
+#   - correct phenotype-specific overall test
+#   - ALL significant pairwise comparisons
+# ============================================================
+
+phenotype_plots <- list()
+
+
+for (phenotype in phenotype_cols) {
+  
+  phenotype_plots[[phenotype]] <- plot_outcome(
+    shearstressdata,
+    phenotype,
+    phenotype,
+    phenotype_anova_results,
+    phenotype_pairwise_results
+  )
+  
+}
+
+
+# Display each phenotype individually
+
+phenotype_plots[["normalised cell size change"]]
+
+phenotype_plots[["mitosis (%)"]]
+
+phenotype_plots[["macrovacuoles (%)"]]
+
+phenotype_plots[["fragmenting (%)"]]
+
+phenotype_plots[["blebbing (%)"]]
+
+phenotype_plots[["rolling (%)"]]
+
+
+# # Add a break in the y-axis from 30 to 90 (only relevant if z-vad condition is included)
+# phenotype_plots[["detachment (%)"]] <-
+#   phenotype_plots[["detachment (%)"]] +
+#   scale_y_break(c(20, 55))
+
+# Display the updated plot
+phenotype_plots[["detachment (%)"]]
+
+
+phenotype_plots[["snake-like protrusion (%)"]]
+
+
+# ============================================================
+# 24. PHENOTYPE CORRELATIONS
+#
+# All phenotype variables are percentages.
+#
+# Spearman correlations are used to explore relationships
+# between phenotype percentages.
+# ============================================================
+
+phenotype_correlation_data <- shearstressdata %>%
+  select(
+    all_of(phenotype_cols)
+  )
+
+
+phenotype_correlation_matrix <- cor(
+  phenotype_correlation_data,
+  use = "pairwise.complete.obs",
+  method = "spearman"
+)
+
+
+# View(
+#   round(
+#     phenotype_correlation_matrix,
+#     2
+#   )
+# )
+
+
+# ============================================================
+# 25. EFFECT SIZE / DIFFERENCE FROM UNTREATED
+#
+# Main outcome:
+# difference between each treatment mean and the overall
+# Untreated mean.
+# ============================================================
+
+untreated_means <- shearstressdata %>%
+  filter(
+    Test == "Untreated"
+  ) %>%
+  summarise(
+    untreated = mean(
+      percent_decrease_cell_count,
+      na.rm = TRUE
+    )
+  )
+
+
+effect_summary <- shearstressdata %>%
+  group_by(Test) %>%
+  summarise(
+    value = mean(
+      percent_decrease_cell_count,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    untreated = untreated_means$untreated,
+    difference_from_untreated =
+      value - untreated
+  ) %>%
+  filter(
+    Test != "Untreated"
+  )
+
+# View(effect_summary)
+
+
+# ============================================================
+# 26. EFFECT SIZE FOR PHENOTYPES
+#
+# Difference between each treatment mean and the Untreated
+# mean for the same phenotype.
+# ============================================================
+
+phenotype_untreated_means <- phenotype_long %>%
+  filter(
+    Test == "Untreated"
+  ) %>%
+  group_by(
+    Phenotype
+  ) %>%
+  summarise(
+    untreated_mean = mean(
+      Percentage,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+
+phenotype_treatment_means <- phenotype_long %>%
+  group_by(
+    Phenotype,
+    Test
+  ) %>%
+  summarise(
+    mean_percentage = mean(
+      Percentage,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+
+phenotype_effects <- phenotype_treatment_means %>%
+  left_join(
+    phenotype_untreated_means,
+    by = "Phenotype"
+  ) %>%
+  mutate(
+    difference_from_untreated =
+      mean_percentage - untreated_mean
+  ) %>%
+  filter(
+    Test != "Untreated"
+  )
+
+# View(phenotype_effects)
+
+
+# ============================================================
+# 27. FINAL STATISTICAL OUTPUT
+# ============================================================
+
+# ------------------------------------------------------------
+# Main outcomes
+# ------------------------------------------------------------
+
+# View(descriptive_statistics)
+# View(anova_results)
+# View(normality_results)
+# View(pairwise_results)
+# View(untreated_stats)
+# View(estimated_means)
+
+
+# ------------------------------------------------------------
+# Phenotypes
+# ------------------------------------------------------------
+
+# View(phenotype_statistics)
+# View(phenotype_anova_results)
+# View(phenotype_normality_results)
+# View(phenotype_pairwise_results)
+# View(phenotype_vs_untreated)
+# View(phenotype_effects)
+
+
+# ------------------------------------------------------------
+# Phenotype correlations
+# ------------------------------------------------------------
+
+# View(
+#   round(
+#     phenotype_correlation_matrix,
+#     2
+#   )
+# )
